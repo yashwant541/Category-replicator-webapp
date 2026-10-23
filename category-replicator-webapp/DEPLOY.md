@@ -5,7 +5,7 @@ No project-library upload needed: `backend_single.py` embeds everything (verifie
 ## One-time
 - [ ] **Code env** (the webapp's, or project default) has: `pandas`, `numpy`, `openpyxl`, `flask` (already in Dataiku). Add `xlrd` only if you will upload legacy `.xls`. Python 3.9–3.11.
 - [ ] **Managed folder** for storage (any connection; holds systems, training files, run outputs). Copy its id (shown in the folder URL).
-- [ ] **Project variable** `REPLICATOR_FOLDER` = that folder id (Project → Settings → Variables, e.g. `{"REPLICATOR_FOLDER": "aB3dK9Zx"}`). Alternative: set `FOLDER_FALLBACK` in `replicator/store.py` and rebuild.
+- [ ] **Folder setting**: at the top of the Python pane set `REPLICATOR_FOLDER = "<folder name or id>"` (global variable). If left empty, the project variable `REPLICATOR_FOLDER` is used instead.
 - [ ] The user running the webapp has **read + write** on that folder.
 
 ## Create the webapp

@@ -101,13 +101,26 @@ def _entries(store, files: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 
 # ===================================================================== systems
+INDEX = "index.json"
+
+
+def _read_index(store) -> Dict[str, Any]:
+    idx = get_json(store, INDEX)
+    if idx is None:  # first run, or index lost: rebuild from the system folders
+        idx = {"systems": {}}
+        for p in store.list("systems/"):
+            if p.endswith("/system.json"):
+                sid = p.split("/")[-2]
+                try:
+                    idx["systems"][sid] = system_card(get_system(store, sid))
+                except Exception:  # noqa: BLE001
+                    continue
+        put_json(store, INDEX, idx)
+    return idx
+
+
 def list_systems(store) -> List[Dict[str, Any]]:
-    res = []
-    for p in store.list("systems/"):
-        if p.endswith("/system.json"):
-            s = get_json(store, p.lstrip("/"))
-            if s:
-                res.append(system_card(s))
+    res = list(_read_index(store)["systems"].values())
     res.sort(key=lambda s: s.get("updated") or s.get("created") or "", reverse=True)
     return res
 
@@ -123,21 +136,64 @@ def system_card(s: Dict[str, Any]) -> Dict[str, Any]:
             "columns": len(s.get("output", {}).get("columns", []))}
 
 
+def _tslug(name: str) -> str:
+    return re.sub(r"[^A-Za-z0-9._-]+", "_", name)[:80] or "table"
+
+
 def get_system(store, sid: str) -> Dict[str, Any]:
+    """Assemble a system from its files: system.json + rules.json + tables/<name>.json."""
     s = get_json(store, f"systems/{sid}/system.json")
     if s is None:
         raise KeyError("system not found")
+    if "rules" not in s:
+        s["rules"] = (get_json(store, f"systems/{sid}/rules.json") or {}).get("rules", [])
+    if "tables" not in s:  # (older systems kept everything inline - handled by the `in` checks)
+        s["tables"] = {}
+        for name, fn in (s.get("table_files") or {}).items():
+            t = get_json(store, f"systems/{sid}/tables/{fn}.json")
+            if t is not None:
+                s["tables"][name] = t
     return s
 
 
 def save_system(store, s: Dict[str, Any]) -> None:
+    """Readable layout in the folder:
+        index.json                       one card per system (fast home page)
+        systems/<id>/system.json         name, input/output layout, filters, toggles, training info
+        systems/<id>/rules.json          every column rule (formulas, lookups, ...)
+        systems/<id>/tables/<name>.json  one file per mapping table (rewritten only when changed)
+    """
+    import hashlib
+    import json as _json
     s["updated"] = _now()
-    put_json(store, f"systems/{s['id']}/system.json", s)
+    sid = s["id"]
+    base = f"systems/{sid}"
+    tables = s.get("tables", {})
+    files = {n: _tslug(n) for n in tables}
+    hashes = dict(s.get("table_hashes") or {})
+    for n, spec in tables.items():
+        h = hashlib.md5(_json.dumps(spec, sort_keys=True, default=str).encode("utf-8")).hexdigest()
+        if hashes.get(n) != h or store.get(f"{base}/tables/{files[n]}.json") is None:
+            put_json(store, f"{base}/tables/{files[n]}.json", spec, indent=1)
+            hashes[n] = h
+    for old in set(hashes) - set(tables):
+        store.delete(f"{base}/tables/{_tslug(old)}.json")
+        hashes.pop(old, None)
+    lean = {k: v for k, v in s.items() if k not in ("rules", "tables")}
+    lean["table_files"], lean["table_hashes"] = files, hashes
+    put_json(store, f"{base}/rules.json", {"rules": s.get("rules", [])}, indent=1)
+    put_json(store, f"{base}/system.json", lean, indent=1)
+    idx = _read_index(store)
+    idx["systems"][sid] = system_card(s)
+    put_json(store, INDEX, idx)
 
 
 def delete_system(store, sid: str) -> None:
     delete_prefix(store, f"systems/{sid}/")
     delete_prefix(store, f"runs/{sid}/")
+    idx = _read_index(store)
+    idx["systems"].pop(sid, None)
+    put_json(store, INDEX, idx)
 
 
 def _training_frames(store, s: Dict[str, Any]) -> Tuple[pd.DataFrame, pd.DataFrame]:

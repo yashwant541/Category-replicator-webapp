@@ -86,7 +86,9 @@ class DataikuStore:  # pragma: no cover - only inside Dataiku
             pass
 
 
-def _folder_id() -> str:
+def _folder_id(preset: str = "") -> str:
+    if preset:
+        return preset
     fid = os.environ.get("REPLICATOR_FOLDER", "")
     if _HAS_DATAIKU:
         try:
@@ -96,15 +98,15 @@ def _folder_id() -> str:
     return fid or FOLDER_FALLBACK
 
 
-def make_store() -> Any:
-    fid = _folder_id()
+def make_store(folder: str = "") -> Any:
+    fid = _folder_id(folder)
     if _HAS_DATAIKU and fid:
         return DataikuStore(fid)
     return LocalStore(os.environ.get("REPLICATOR_LOCAL_ROOT", "_replicator_data"))
 
 
-def put_json(store: Any, path: str, obj: Any) -> None:
-    store.put(path, json.dumps(obj, ensure_ascii=False, default=str).encode("utf-8"))
+def put_json(store: Any, path: str, obj: Any, indent: Optional[int] = None) -> None:
+    store.put(path, json.dumps(obj, ensure_ascii=False, default=str, indent=indent).encode("utf-8"))
 
 
 def get_json(store: Any, path: str) -> Optional[Any]:

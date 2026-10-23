@@ -65,6 +65,15 @@
     return viewHome();
   }
   window.addEventListener("hashchange", route);
+  // Dataiku can inject a <base href>, which turns href="#/x" into a jump to the Dataiku page.
+  // Handle in-app links ourselves: never follow the href, just switch the hash route.
+  document.addEventListener("click", e => {
+    const a = e.target.closest && e.target.closest("a[href^='#/']");
+    if (!a) return;
+    e.preventDefault();
+    const target = a.getAttribute("href").slice(1);
+    if (location.hash.replace(/^#/, "") === target) route(); else location.hash = target;
+  });
 
   /* ================================================================== home */
   async function viewHome() {

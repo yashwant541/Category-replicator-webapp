@@ -28,6 +28,10 @@ except NameError:  # pragma: no cover
     from flask import Flask
     app = Flask(__name__)
 
+# ---- GLOBAL SETTING: the managed folder where systems, mappings, rules and runs are saved.
+# Put the folder's name or id here. If left empty, the project variable REPLICATOR_FOLDER is used.
+REPLICATOR_FOLDER = ""
+
 _STORE = None
 _MAX_UPLOAD = 200 * 1024 * 1024
 
@@ -35,7 +39,7 @@ _MAX_UPLOAD = 200 * 1024 * 1024
 def store():
     global _STORE
     if _STORE is None:
-        _STORE = make_store()
+        _STORE = make_store(REPLICATOR_FOLDER)
     return _STORE
 
 
