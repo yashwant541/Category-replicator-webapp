@@ -300,7 +300,7 @@ def _tree(tree: Dict[str, Any], work: pd.DataFrame) -> pd.Series:
 
 # -------------------------------------------------------------------------- formula
 def formula_series(rule: Dict[str, Any], work: pd.DataFrame, ctx: Ctx) -> pd.Series:
-    from webapp_core import compute  # lazy: keeps rules importable on its own
+    from replicator_formulas import compute  # lazy: keeps rules importable on its own
     lk = compute.Lookups({
         n: {"headers": list(df.columns), "records": df.to_dict("records"), "header_row": 0}
         for n, df in ctx.tables.items()

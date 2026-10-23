@@ -1,7 +1,7 @@
 """Build backend_single.py: one file to paste into the Dataiku webapp Python pane.
 
 The library modules are embedded as source strings and registered as in-memory modules
-(`webapp_core.*`, `replicator.*`), so no project-library upload is needed and the code is
+(`replicator_formulas.*`, `replicator.*`), so no project-library upload is needed and the code is
 byte-for-byte what the tests run.      python build_single.py
 """
 import pathlib
@@ -9,7 +9,7 @@ import pathlib
 ROOT = pathlib.Path(__file__).resolve().parent
 LIB = ROOT / "python-lib"
 ORDER = [
-    ("webapp_core", ["__init__", "formula_translate", "sample_parser", "compute"]),
+    ("replicator_formulas", ["__init__", "formula_translate", "sample_parser", "compute"]),
     ("replicator", ["__init__", "rules", "tables", "learn", "engine", "store", "service"]),
 ]
 

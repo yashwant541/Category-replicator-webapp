@@ -201,7 +201,7 @@ def build_system(entries: List[Dict[str, Any]], options: Dict[str, Any]) -> Dict
     toggles: List[Dict[str, Any]] = []
     fe = next((e for e in out_group if e.get("n_formulas") and e.get("bytes")), None)
     if fe is not None:
-        from webapp_core.sample_parser import analyze_sample, sheet_to_records
+        from replicator_formulas.sample_parser import analyze_sample, sheet_to_records
         try:
             an = analyze_sample(fe["bytes"], data_sheet=fe["sheet"])
             toggles = an.get("toggles", [])

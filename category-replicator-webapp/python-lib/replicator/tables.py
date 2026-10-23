@@ -12,7 +12,7 @@ import numpy as np
 import openpyxl
 import pandas as pd
 
-from webapp_core.sample_parser import detect_header_row, _headers_from_row, _norm
+from replicator_formulas.sample_parser import detect_header_row, _headers_from_row, _norm
 from .rules import is_blank, nk
 
 

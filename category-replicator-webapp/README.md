@@ -25,7 +25,7 @@ split** (one output sheet per value of a column). Both are editable under *Filte
 can also be set up front in the wizard (single / auto-detect / by column / custom filters per sheet).
 
 ## Deploy in Dataiku (short version — full checklist in DEPLOY.md; one-file backend: `backend_single.py`, rebuilt with `python build_single.py`)
-1. Project → **Libraries → python/**: copy the whole `python-lib/` contents (`webapp_core/` and `replicator/`).
+1. Project → **Libraries → python/**: copy the whole `python-lib/` contents (`replicator_formulas/` and `replicator/`).
 2. Create a **managed folder** for storage; set the project variable `REPLICATOR_FOLDER` to its id
    (or edit `FOLDER_FALLBACK` in `replicator/store.py`).
 3. New **Standard webapp** → paste `frontend/body.html`, `frontend/style.css`, `frontend/app.js`

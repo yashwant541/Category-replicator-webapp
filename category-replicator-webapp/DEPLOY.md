@@ -30,7 +30,7 @@ Rebuild with `python build_single.py`, paste the new `backend_single.py` over th
 | Symptom | Cause / fix |
 |---|---|
 | `storage: LocalStore` | `REPLICATOR_FOLDER` not set or not visible to the webapp; restart backend after setting. |
-| `ModuleNotFoundError: webapp_core` / `replicator` | You pasted `backend/backend.py` instead of `backend_single.py` (or didn't upload `python-lib/`). |
+| `ModuleNotFoundError: replicator_formulas` / `replicator` | You pasted `backend/backend.py` instead of `backend_single.py` (or didn't upload `python-lib/`). |
 | Upload fails / very large files | Backend limit is 200 MB per file; Dataiku/nginx may impose a lower one. |
 | "no sheet has the expected input columns" | Run input is missing columns the rules read; use **Input template** on the system page. |
 | Column marked *Needs a rule* | Not enough examples to infer it; edit the rule JSON (e.g. `{"kind":"formula","pandas_expr":"df['Amount']*0.05"}`) and run the replay check. |

@@ -6,7 +6,7 @@ app learns a rule for every output column - copy, lookup into a mapping, arithme
 IF/bands, date parts, or the live Excel formula itself.  Run the category on new data to get the
 same output back, optionally split into several sheets by a filter.
 
-Needs ``webapp_core`` and ``replicator`` on the project's Python libraries (both in ``python-lib/``).
+Needs ``replicator_formulas`` and ``replicator`` on the project's Python libraries (both in ``python-lib/``).
 Storage: one managed folder whose id is the project variable ``REPLICATOR_FOLDER`` (see store.py).
 """
 
