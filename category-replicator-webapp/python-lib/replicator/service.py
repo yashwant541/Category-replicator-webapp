@@ -13,7 +13,7 @@ import pandas as pd
 from . import engine
 from .rules import nk
 from .store import delete_prefix, get_json, put_json
-from .tables import guess_role, jsonable, read_workbook, summarize, canonical_columns
+from .tables import formula_sheet_refs, guess_role, jsonable, read_workbook, summarize, canonical_columns
 
 ALLOWED = (".xlsx", ".xlsm", ".xls", ".csv", ".txt")
 ROLES = ("input", "mapping", "output", "ignore")
@@ -51,11 +51,15 @@ def add_draft_files(store, did: str, files: List[Tuple[str, bytes]], hint: str =
             raise ValueError(f"{name}: no data found")
         fid = uuid.uuid4().hex[:8]
         store.put(f"drafts/{did}/files/{fid}_{_slug(name)}", data)
+        fr = formula_sheet_refs(data, name) if hint == "output" else {"referenced": set()}
         ent = {"fid": fid, "name": name, "path": f"drafts/{did}/files/{fid}_{_slug(name)}", "sheets": []}
         for i, s in enumerate(sheets):
             role = hint if hint in ROLES and hint != "ignore" else guess_role(name, s["sheet"], s["n_formulas"], i == 0)
             if hint == "output":
                 role = "output"
+                # an output workbook often carries the mapping sheets its formulas use
+                if fr["referenced"] and s["sheet"] in fr["referenced"]:
+                    role = "mapping"
             ent["sheets"].append({"sheet": s["sheet"], "role": role, "n_formulas": s["n_formulas"],
                                   "header_row": s["header_row"], **summarize(s["df"])})
         d["files"].append(ent)

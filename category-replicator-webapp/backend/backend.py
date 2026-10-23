@@ -39,7 +39,13 @@ _MAX_UPLOAD = 200 * 1024 * 1024
 def store():
     global _STORE
     if _STORE is None:
-        _STORE = make_store(REPLICATOR_FOLDER)
+        try:
+            _STORE = make_store(REPLICATOR_FOLDER)
+        except TypeError:  # stale replicator/store.py in the project libraries: use the env fallback
+            import os
+            if REPLICATOR_FOLDER:
+                os.environ["REPLICATOR_FOLDER"] = REPLICATOR_FOLDER
+            _STORE = make_store()
     return _STORE
 
 

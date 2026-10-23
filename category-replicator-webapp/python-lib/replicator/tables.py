@@ -118,3 +118,22 @@ def canonical_columns(df: pd.DataFrame, wanted: List[str]) -> pd.DataFrame:
             ren[c] = t
             seen.add(t)
     return df.rename(columns=ren)
+
+
+_SHEET_REF = re.compile(r"(?:'((?:[^']|'')+)'|([A-Za-z_][A-Za-z0-9_.]*))!")
+
+
+def formula_sheet_refs(file_bytes: bytes, filename: str) -> Dict[str, Any]:
+    """Which sheets hold formulas, and which sheets those formulas point at (mapping sheets)."""
+    if not (filename or "").lower().endswith((".xlsx", ".xlsm")):
+        return {"with_formulas": set(), "referenced": set()}
+    wb = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=False)
+    withf, refd = set(), set()
+    for ws in wb.worksheets:
+        for row in ws.iter_rows():
+            for c in row:
+                if isinstance(c.value, str) and c.value.startswith("="):
+                    withf.add(ws.title)
+                    for m in _SHEET_REF.finditer(c.value):
+                        refd.add((m.group(1) or m.group(2)).replace("''", "'"))
+    return {"with_formulas": withf, "referenced": refd - {ws.title for ws in wb.worksheets if ws.title in withf}}
