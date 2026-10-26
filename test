@@ -1,1 +1,727 @@
 
+# -*- coding: utf-8 -*-
+"""Retail STD RWA recomputation plus independent Excel formula-template output."""
+
+import io
+import json
+import os
+import re
+from datetime import datetime
+from pathlib import PurePosixPath
+
+import dataiku
+import numpy as np
+import pandas as pd
+from openpyxl.styles import Alignment, Font, PatternFill
+from openpyxl.utils import get_column_letter
+
+# =============================================================================
+# 1. DATAIKU CONFIGURATION
+# =============================================================================
+DATA_FOLDER_ID = "UxEG1uQL"
+MAPPING_FOLDER_ID = "OvwVxyAX"  # Optional fallback if mapping is not embedded
+OUTPUT_FOLDER_ID = "cTUpQ03o"
+TEMPLATE_OUTPUT_FOLDER_ID = "mE37wT3m"
+SELECTION_MANIFEST_PATH = "/_webapp_metadata/selected_inputs.json"
+CATEGORY = "retail"
+
+HEADER_SEARCH_LIMIT = 100
+SUPPORTED_EXTENSIONS = {".xlsx", ".xlsm", ".xlsb", ".csv"}
+EXCEL_EXTENSIONS = {".xlsx", ".xlsm", ".xlsb"}
+OUTPUT_NAME_TEMPLATE = "{base}_RETAIL_RWA_{run_id}.xlsx"
+TEMPLATE_NAME_TEMPLATE = "{base}_RETAIL_RWA_TEMPLATE_{run_id}.xlsx"
+OUTPUT_SHEET_NAME = "Retail Output"
+TEMPLATE_DATA_SHEET = "Retail Template"
+TEMPLATE_RW_MAPPING_SHEET = "Risk Weight Mapping"
+
+MAPPING_SHEET_PATTERN = re.compile(r"^mapping(?:\s+\d+)?$", re.I)
+
+# =============================================================================
+# 2. RETAIL BUSINESS CONFIGURATION
+# =============================================================================
+DEFAULT_PROVISION_THRESHOLD = 0.20
+REG_RETAIL_AGGREGATE_LIMIT = 880000.00
+CCY_MISMATCH_MULTIPLIER = 1.50
+MAX_ADJUSTED_RW = 1.50
+
+AGGREGATE_EXPOSURE_COLUMN = "Aggregate_Exposure"
+RETAIL_FLAG_COLUMN = "Retail_Flag"
+REG_RETAIL_FLAG_COLUMN = "Reg_Retail_Flag"
+RW_KEY_OUTPUT_COLUMN = "RW_Key"
+STANDARD_RW_OUTPUT_COLUMN = "Standard_RW"
+CCY_MISMATCH_OUTPUT_COLUMN = "CCY_Mismatch_Mult"
+ADJUSTED_RW_OUTPUT_COLUMN = "Adjusted_RW"
+RWA_OUTPUT_COLUMN = "RWA_RECOMPUTED"
+
+SOURCE_COLUMNS = [
+    "PARTITION_KEY", "FACILITY_REFERENCE", "CONTRACT_REFERENCE",
+    "CPTY_GROUP_ORIGINAL", "CPTY_GROUP", "TRANCHE_COLLATERAL_TYPE",
+    "ASSET_CLASS_NEW", "BIS_ENTITY_TYPE_ORIGINAL", "BIS_ENTITY_TYPE_NEW",
+    "BIS_PRODUCT", "BIS_PAST_DUE", "EAD", "EAD_PRO", "BS_TYPE",
+    "AVAILABLE_AMOUNT", "CCF_STD", "EXPOSURE_TO_PENSIONER_EMPLOYEE_FLAG",
+    "TRANSACTOR_FLAG", "CURRENCY", "ENTITY_CURRENCY", "HEDGED", "RWA",
+]
+
+CALCULATED_COLUMNS = [
+    AGGREGATE_EXPOSURE_COLUMN, RETAIL_FLAG_COLUMN, REG_RETAIL_FLAG_COLUMN,
+    RW_KEY_OUTPUT_COLUMN, STANDARD_RW_OUTPUT_COLUMN,
+    CCY_MISMATCH_OUTPUT_COLUMN, ADJUSTED_RW_OUTPUT_COLUMN, RWA_OUTPUT_COLUMN,
+]
+
+FINAL_COLUMNS = SOURCE_COLUMNS + CALCULATED_COLUMNS
+DATA_DETECTION_COLUMNS = {"FACILITY_REFERENCE", "ASSET_CLASS_NEW", "EAD"}
+REQUIRED_CALC_COLUMNS = {
+    "CPTY_GROUP", "ASSET_CLASS_NEW", "BIS_ENTITY_TYPE_NEW", "BIS_PAST_DUE",
+    "EAD", "EAD_PRO", "EXPOSURE_TO_PENSIONER_EMPLOYEE_FLAG",
+    "TRANSACTOR_FLAG", "CURRENCY", "ENTITY_CURRENCY", "HEDGED",
+}
+REQUIRED_RW_KEYS = {
+    "RETAIL_PENSIONER", "RETAIL_TRANSACTOR", "RETAIL_NONTRANSACTOR",
+    "RETAIL_OTHER", "DEFAULT_100", "DEFAULT_150",
+}
+
+INDIVIDUAL_ENTITY_VALUES = {
+    "INDIV", "INDIVIDUAL", "INDIVIDUALS", "NATURAL PERSON", "NATURAL_PERSON"
+}
+SME_ENTITY_VALUES = {
+    "SME", "SMALL AND MEDIUM ENTERPRISE", "SMALL_MEDIUM_ENTERPRISE"
+}
+RETAIL_ASSET_CLASS_VALUES = {
+    "RETAIL", "CLAIM_RETAIL", "CLAIM_RETAIL_OTHER", "RETAIL_OTHER"
+}
+
+HEADER_ALIASES = {
+    "EXPOSURE_TO_PENSIONER_EMPLOYEE_FLAG": "EXPOSURE_TO_PENSIONER_EMPLOYEE_FLAG",
+    "EXPOSURE_TO_PENSIONER_EMPLOYEE": "EXPOSURE_TO_PENSIONER_EMPLOYEE_FLAG",
+    "TRANSACTOR_FLAG": "TRANSACTOR_FLAG",
+    "LOOKUP_KEY": "LOOKUP_KEY",
+    "RW_KEY": "LOOKUP_KEY",
+    "RISK_WEIGHT": "RISK_WEIGHT",
+    "STANDARD_RW": "RISK_WEIGHT",
+}
+
+# =============================================================================
+# 3. GENERAL HELPERS
+# =============================================================================
+def extension(path):
+    return PurePosixPath(str(path)).suffix.lower()
+
+
+def supported(path):
+    return extension(path) in SUPPORTED_EXTENSIONS
+
+
+def excel_engine(path):
+    return "pyxlsb" if extension(path) == ".xlsb" else "openpyxl"
+
+
+def normalize_path(path):
+    value = str(path or "").replace("\\", "/").strip()
+    return value if value.startswith("/") else "/" + value
+
+
+def basename_without_extension(path):
+    return os.path.splitext(PurePosixPath(path).name)[0]
+
+
+def clean_text(value):
+    if value is None:
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except Exception:
+        pass
+    return str(value).strip()
+
+
+def normalize_column(value):
+    value = clean_text(value)
+    value = re.sub(r"[\r\n\t]+", " ", value)
+    value = re.sub(r"[^A-Za-z0-9]+", "_", value)
+    value = re.sub(r"_+", "_", value).strip("_").upper()
+    return HEADER_ALIASES.get(value, value)
+
+
+def normalize_token(value):
+    return re.sub(r"\s+", " ", clean_text(value)).strip().upper()
+
+
+def make_unique(columns):
+    used = {}
+    output = []
+    for raw in columns:
+        base = normalize_column(raw) or "UNNAMED"
+        used[base] = used.get(base, 0) + 1
+        output.append(base if used[base] == 1 else "{}_{}".format(base, used[base]))
+    return output
+
+
+def normalize_columns(frame):
+    result = frame.copy()
+    result.columns = make_unique(result.columns)
+    return result
+
+
+def numeric_series(series):
+    def parse(value):
+        if value is None:
+            return np.nan
+        try:
+            if pd.isna(value):
+                return np.nan
+        except Exception:
+            pass
+        if isinstance(value, (int, float, np.number)) and not isinstance(value, bool):
+            return float(value)
+        text_value = str(value).strip().replace(",", "")
+        if not text_value:
+            return np.nan
+        is_percent = text_value.endswith("%")
+        if is_percent:
+            text_value = text_value[:-1].strip()
+        try:
+            number = float(text_value)
+            return number / 100.0 if is_percent else number
+        except ValueError:
+            return np.nan
+    return series.map(parse).astype(float)
+
+
+def yes(value):
+    return normalize_token(value) in {"Y", "YES", "TRUE", "T", "1"}
+
+
+def no(value):
+    return normalize_token(value) in {"N", "NO", "FALSE", "F", "0"}
+
+
+def is_individual(value):
+    return normalize_token(value) in INDIVIDUAL_ENTITY_VALUES
+
+
+def is_sme(value):
+    return normalize_token(value) in SME_ENTITY_VALUES
+
+
+def is_retail_asset_class(value):
+    token = normalize_token(value).replace("-", "_").replace(" ", "_")
+    if token in RETAIL_ASSET_CLASS_VALUES:
+        return True
+    return "RETAIL" in token and not token.startswith(("NON_RETAIL", "NOT_RETAIL"))
+
+
+def read_bytes(folder, path):
+    with folder.get_download_stream(path) as stream:
+        return stream.read()
+
+
+def list_files(folder):
+    return [normalize_path(path) for path in folder.list_paths_in_partition()]
+
+
+def put_bytes(folder, path, content):
+    folder.upload_stream(normalize_path(path), io.BytesIO(content))
+
+# =============================================================================
+# 4. TABLE DETECTION
+# =============================================================================
+def header_score(row_values, known_columns):
+    headers = {normalize_column(value) for value in row_values if clean_text(value)}
+    return len(headers.intersection(known_columns)), headers
+
+
+def dataframe_from_raw(raw, header_index):
+    headers = make_unique(raw.iloc[header_index].tolist())
+    frame = raw.iloc[header_index + 1:].copy()
+    frame.columns = headers
+    frame = frame.dropna(how="all").reset_index(drop=True)
+    return frame
+
+
+def read_excel_tables(content, filename, selected_sheets=None):
+    workbook = pd.ExcelFile(io.BytesIO(content), engine=excel_engine(filename))
+    allowed = set(selected_sheets or [])
+    tables = []
+    diagnostics = []
+
+    for sheet_name in workbook.sheet_names:
+        if MAPPING_SHEET_PATTERN.match(clean_text(sheet_name)):
+            continue
+        if allowed and sheet_name not in allowed:
+            continue
+        raw = pd.read_excel(workbook, sheet_name=sheet_name, header=None, dtype=object)
+        if raw.empty:
+            continue
+
+        best = None
+        limit = min(HEADER_SEARCH_LIMIT, len(raw))
+        for idx in range(limit):
+            score, headers = header_score(raw.iloc[idx].tolist(), set(SOURCE_COLUMNS))
+            stable = len(headers.intersection(DATA_DETECTION_COLUMNS))
+            candidate = (stable, score, idx, headers)
+            if best is None or candidate[:2] > best[:2]:
+                best = candidate
+
+        if best is None:
+            continue
+        stable, score, idx, headers = best
+        diagnostics.append({
+            "sheet": sheet_name,
+            "header_row": idx + 1,
+            "stable_matches": stable,
+            "known_matches": score,
+            "headers": sorted(headers),
+        })
+        if not DATA_DETECTION_COLUMNS.issubset(headers):
+            continue
+
+        frame = dataframe_from_raw(raw, idx)
+        frame["_SOURCE_SHEET"] = sheet_name
+        tables.append(frame)
+
+    return tables, diagnostics
+
+
+def read_csv_table(content):
+    frame = pd.read_csv(io.BytesIO(content), dtype=object, sep=None, engine="python")
+    frame = normalize_columns(frame).dropna(how="all").reset_index(drop=True)
+    if not DATA_DETECTION_COLUMNS.issubset(set(frame.columns)):
+        raise ValueError("CSV does not contain the minimum Retail fields: {}".format(
+            sorted(DATA_DETECTION_COLUMNS)))
+    frame["_SOURCE_SHEET"] = "CSV"
+    return [frame]
+
+
+def read_source(folder, path, selected_sheets=None):
+    filename = PurePosixPath(path).name
+    content = read_bytes(folder, path)
+    if extension(filename) == ".csv":
+        tables = read_csv_table(content)
+        diagnostics = []
+    else:
+        tables, diagnostics = read_excel_tables(content, filename, selected_sheets)
+    if not tables:
+        raise ValueError(
+            "No valid Retail worksheet found in '{}'. Header diagnostics: {}".format(
+                filename, diagnostics))
+
+    frames = []
+    for table in tables:
+        frame = normalize_columns(table)
+        marker_columns = [c for c in ["FACILITY_REFERENCE", "CONTRACT_REFERENCE", "EAD"] if c in frame]
+        if marker_columns:
+            keep = frame[marker_columns].apply(
+                lambda row: any(clean_text(value) for value in row), axis=1)
+            frame = frame.loc[keep].copy()
+        frames.append(frame)
+    return pd.concat(frames, ignore_index=True, sort=False)
+
+# =============================================================================
+# 5. MAPPING LOADER
+# =============================================================================
+def mapping_table_from_raw(raw):
+    if raw.empty:
+        return pd.DataFrame()
+    best = None
+    required = {"LOOKUP_KEY", "RISK_WEIGHT"}
+    for idx in range(min(HEADER_SEARCH_LIMIT, len(raw))):
+        score, headers = header_score(raw.iloc[idx].tolist(), required | {"SOURCE"})
+        candidate = (len(headers.intersection(required)), score, idx)
+        if best is None or candidate[:2] > best[:2]:
+            best = candidate
+    if best is not None and best[0] >= 2:
+        return normalize_columns(dataframe_from_raw(raw, best[2]))
+
+    # Headerless Retail mapping layout used by STD Retail.xlsx:
+    # column A = key, column B = risk weight, optional column C = source.
+    rows = []
+    for _, values in raw.iterrows():
+        key = normalize_token(values.iloc[0] if len(values) > 0 else None)
+        weight = values.iloc[1] if len(values) > 1 else None
+        source = values.iloc[2] if len(values) > 2 else None
+        if key in REQUIRED_RW_KEYS:
+            rows.append({
+                "LOOKUP_KEY": key,
+                "RISK_WEIGHT": weight,
+                "SOURCE": source,
+            })
+    return pd.DataFrame(rows)
+
+
+def mapping_tables_from_workbook(content, filename):
+    workbook = pd.ExcelFile(io.BytesIO(content), engine=excel_engine(filename))
+    frames = []
+    for sheet in workbook.sheet_names:
+        if not MAPPING_SHEET_PATTERN.match(clean_text(sheet)):
+            continue
+        raw = pd.read_excel(workbook, sheet_name=sheet, header=None, dtype=object)
+        frame = mapping_table_from_raw(raw)
+        if not frame.empty:
+            frame["SOURCE_SHEET"] = sheet
+            frames.append(frame)
+    return frames
+
+
+def find_external_mapping_workbook(mapping_folder):
+    candidates = [p for p in list_files(mapping_folder)
+                  if extension(p) in EXCEL_EXTENSIONS and not p.startswith("/_webapp_metadata/")]
+    if len(candidates) != 1:
+        raise ValueError(
+            "Expected exactly one Retail mapping workbook in folder {}, found {}: {}".format(
+                MAPPING_FOLDER_ID, len(candidates), candidates))
+    return candidates[0]
+
+
+def load_mapping_for_input(data_folder, input_path, mapping_folder):
+    filename = PurePosixPath(input_path).name
+    content = read_bytes(data_folder, input_path)
+    frames = []
+    if extension(filename) in EXCEL_EXTENSIONS:
+        frames = mapping_tables_from_workbook(content, filename)
+
+    mapping_source = "embedded in {}".format(filename)
+    if not frames:
+        mapping_path = find_external_mapping_workbook(mapping_folder)
+        mapping_name = PurePosixPath(mapping_path).name
+        mapping_content = read_bytes(mapping_folder, mapping_path)
+        frames = mapping_tables_from_workbook(mapping_content, mapping_name)
+        mapping_source = mapping_name
+
+    if not frames:
+        raise ValueError("No valid Mapping / Mapping N table found for '{}'".format(filename))
+
+    mapping = pd.concat(frames, ignore_index=True, sort=False)
+    mapping = mapping[[c for c in ["LOOKUP_KEY", "RISK_WEIGHT", "SOURCE", "SOURCE_SHEET"] if c in mapping]]
+    mapping["LOOKUP_KEY"] = mapping["LOOKUP_KEY"].map(normalize_token)
+    mapping["RISK_WEIGHT"] = numeric_series(mapping["RISK_WEIGHT"])
+    mapping = mapping.loc[mapping["LOOKUP_KEY"].ne("")].copy()
+
+    invalid = mapping.loc[mapping["RISK_WEIGHT"].isna(), "LOOKUP_KEY"].unique().tolist()
+    if invalid:
+        raise ValueError("Non-numeric Retail risk weights for keys: {}".format(invalid))
+
+    conflict = mapping.groupby("LOOKUP_KEY")["RISK_WEIGHT"].nunique()
+    conflict = conflict[conflict > 1]
+    if not conflict.empty:
+        raise ValueError("Conflicting Retail risk weights for keys: {}".format(conflict.index.tolist()))
+
+    mapping = mapping.drop_duplicates("LOOKUP_KEY", keep="last").reset_index(drop=True)
+    missing = sorted(REQUIRED_RW_KEYS - set(mapping["LOOKUP_KEY"]))
+    if missing:
+        raise ValueError("Retail mapping is missing required keys: {}".format(missing))
+    return mapping, mapping_source
+
+# =============================================================================
+# 6. RETAIL CALCULATION
+# =============================================================================
+def prepare_source(frame):
+    result = normalize_columns(frame)
+
+    # Remove previous generated outputs while retaining the first regulatory RWA.
+    drop_columns = []
+    calculated_normalized = {normalize_column(c) for c in CALCULATED_COLUMNS}
+    for column in result.columns:
+        if normalize_column(column) in calculated_normalized:
+            drop_columns.append(column)
+    result = result.drop(columns=drop_columns, errors="ignore")
+
+    # Duplicate RWA columns are kept only as the first source RWA.
+    rwa_columns = [c for c in result.columns if c == "RWA" or c.startswith("RWA_")]
+    if rwa_columns:
+        if "RWA" not in result.columns:
+            result = result.rename(columns={rwa_columns[0]: "RWA"})
+            rwa_columns = [c for c in result.columns if c == "RWA" or c.startswith("RWA_")]
+        result = result.drop(columns=[c for c in rwa_columns if c != "RWA"], errors="ignore")
+
+    for column in SOURCE_COLUMNS:
+        if column not in result.columns:
+            result[column] = np.nan
+
+    missing = sorted(c for c in REQUIRED_CALC_COLUMNS if c not in result.columns)
+    if missing:
+        raise ValueError("Retail source is missing required calculation columns: {}".format(missing))
+
+    ordered = SOURCE_COLUMNS + [c for c in result.columns if c not in SOURCE_COLUMNS and c != "_SOURCE_SHEET"]
+    if "_SOURCE_SHEET" in result.columns:
+        ordered.append("_SOURCE_SHEET")
+    return result[ordered].copy()
+
+
+def calculate_retail(frame, mapping):
+    result = prepare_source(frame)
+    ead = numeric_series(result["EAD"]).fillna(0.0)
+    ead_pro = numeric_series(result["EAD_PRO"]).fillna(0.0)
+
+    group_key = result["CPTY_GROUP"].map(clean_text)
+    fallback_group = result["CPTY_GROUP_ORIGINAL"].map(clean_text)
+    group_key = group_key.where(group_key.ne(""), fallback_group)
+    group_key = group_key.where(group_key.ne(""), result["CONTRACT_REFERENCE"].map(clean_text))
+    group_key = group_key.where(group_key.ne(""), result["FACILITY_REFERENCE"].map(clean_text))
+    group_key = group_key.where(group_key.ne(""), pd.Series(result.index.astype(str), index=result.index))
+
+    result[AGGREGATE_EXPOSURE_COLUMN] = ead.groupby(group_key).transform("sum")
+
+    retail_asset = result["ASSET_CLASS_NEW"].map(is_retail_asset_class)
+    individual = result["BIS_ENTITY_TYPE_NEW"].map(is_individual)
+    sme = result["BIS_ENTITY_TYPE_NEW"].map(is_sme)
+    within_limit = result[AGGREGATE_EXPOSURE_COLUMN].le(REG_RETAIL_AGGREGATE_LIMIT)
+
+    result[RETAIL_FLAG_COLUMN] = np.where(retail_asset, "Retail", "Non-Retail")
+    reg_retail = retail_asset & (individual | sme) & within_limit
+    result[REG_RETAIL_FLAG_COLUMN] = np.where(reg_retail, "Yes", "No")
+
+    past_due = result["BIS_PAST_DUE"].map(yes)
+    denominator = ead + ead_pro
+    provision_ratio_ok = denominator.gt(0) & ead_pro.ge(DEFAULT_PROVISION_THRESHOLD * denominator)
+    pensioner = result["EXPOSURE_TO_PENSIONER_EMPLOYEE_FLAG"].map(yes)
+    transactor = result["TRANSACTOR_FLAG"].map(yes)
+
+    rw_key = pd.Series("", index=result.index, dtype=object)
+    rw_key.loc[past_due & provision_ratio_ok] = "DEFAULT_100"
+    rw_key.loc[past_due & ~provision_ratio_ok] = "DEFAULT_150"
+
+    current = ~past_due
+    rw_key.loc[current & reg_retail & pensioner] = "RETAIL_PENSIONER"
+    rw_key.loc[current & reg_retail & ~pensioner & transactor] = "RETAIL_TRANSACTOR"
+    rw_key.loc[current & reg_retail & ~pensioner & ~transactor] = "RETAIL_NONTRANSACTOR"
+    rw_key.loc[current & ~reg_retail] = "RETAIL_OTHER"
+    result[RW_KEY_OUTPUT_COLUMN] = rw_key
+
+    rw_map = dict(zip(mapping["LOOKUP_KEY"], mapping["RISK_WEIGHT"]))
+    result[STANDARD_RW_OUTPUT_COLUMN] = result[RW_KEY_OUTPUT_COLUMN].map(rw_map)
+    unmapped = sorted(result.loc[result[STANDARD_RW_OUTPUT_COLUMN].isna(), RW_KEY_OUTPUT_COLUMN].unique())
+    if unmapped:
+        raise ValueError("Generated Retail RW keys are not mapped: {}".format(unmapped))
+
+    currency = result["CURRENCY"].map(normalize_token)
+    entity_currency = result["ENTITY_CURRENCY"].map(normalize_token)
+    currency_mismatch = currency.ne("") & entity_currency.ne("") & currency.ne(entity_currency)
+    unhedged = ~result["HEDGED"].map(yes)
+    mismatch_applies = individual & currency_mismatch & unhedged
+    result[CCY_MISMATCH_OUTPUT_COLUMN] = np.where(
+        mismatch_applies, CCY_MISMATCH_MULTIPLIER, 1.0)
+
+    standard_rw = numeric_series(result[STANDARD_RW_OUTPUT_COLUMN]).fillna(0.0)
+    multiplier = numeric_series(result[CCY_MISMATCH_OUTPUT_COLUMN]).fillna(1.0)
+    result[ADJUSTED_RW_OUTPUT_COLUMN] = np.minimum(standard_rw * multiplier, MAX_ADJUSTED_RW)
+    result[RWA_OUTPUT_COLUMN] = ead * result[ADJUSTED_RW_OUTPUT_COLUMN]
+
+    ordered = [c for c in FINAL_COLUMNS if c in result.columns]
+    extras = [c for c in result.columns if c not in ordered and c != "_SOURCE_SHEET"]
+    return result[ordered + extras]
+
+# =============================================================================
+# 7. EXCEL OUTPUTS
+# =============================================================================
+def style_sheet(sheet):
+    header_fill = PatternFill("solid", fgColor="1F4E78")
+    header_font = Font(color="FFFFFF", bold=True)
+    for cell in sheet[1]:
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    sheet.freeze_panes = "A2"
+    sheet.auto_filter.ref = sheet.dimensions
+    for column_cells in sheet.columns:
+        values = [clean_text(cell.value) for cell in list(column_cells)[:200]]
+        width = min(max([len(v) for v in values] + [10]) + 2, 42)
+        sheet.column_dimensions[get_column_letter(column_cells[0].column)].width = width
+
+
+def write_calculated_workbook(result):
+    stream = io.BytesIO()
+    with pd.ExcelWriter(stream, engine="openpyxl") as writer:
+        result.to_excel(writer, sheet_name=OUTPUT_SHEET_NAME, index=False)
+        style_sheet(writer.book[OUTPUT_SHEET_NAME])
+    return stream.getvalue()
+
+
+def excel_col_map(columns):
+    return {name: get_column_letter(index + 1) for index, name in enumerate(columns)}
+
+
+def build_formula_template(source, mapping):
+    template = prepare_source(source)
+    for column in CALCULATED_COLUMNS:
+        template[column] = ""
+    template = template[[c for c in FINAL_COLUMNS if c in template.columns]]
+
+    stream = io.BytesIO()
+    with pd.ExcelWriter(stream, engine="openpyxl") as writer:
+        template.to_excel(writer, sheet_name=TEMPLATE_DATA_SHEET, index=False)
+        mapping.to_excel(writer, sheet_name=TEMPLATE_RW_MAPPING_SHEET, index=False)
+        data_sheet = writer.book[TEMPLATE_DATA_SHEET]
+        map_sheet = writer.book[TEMPLATE_RW_MAPPING_SHEET]
+        style_sheet(data_sheet)
+        style_sheet(map_sheet)
+
+        cols = excel_col_map(list(template.columns))
+        map_last = len(mapping) + 1
+        key_rng = "'{}'!$A$2:$A${}".format(TEMPLATE_RW_MAPPING_SHEET, map_last)
+        rw_rng = "'{}'!$B$2:$B${}".format(TEMPLATE_RW_MAPPING_SHEET, map_last)
+
+        cpty = cols["CPTY_GROUP"]
+        cpty_orig = cols["CPTY_GROUP_ORIGINAL"]
+        contract = cols["CONTRACT_REFERENCE"]
+        facility = cols["FACILITY_REFERENCE"]
+        asset = cols["ASSET_CLASS_NEW"]
+        entity = cols["BIS_ENTITY_TYPE_NEW"]
+        past_due = cols["BIS_PAST_DUE"]
+        ead = cols["EAD"]
+        ead_pro = cols["EAD_PRO"]
+        pensioner = cols["EXPOSURE_TO_PENSIONER_EMPLOYEE_FLAG"]
+        transactor = cols["TRANSACTOR_FLAG"]
+        currency = cols["CURRENCY"]
+        entity_ccy = cols["ENTITY_CURRENCY"]
+        hedged = cols["HEDGED"]
+
+        for row in range(2, len(template) + 2):
+            group_expr = 'IF({0}{r}<>"",{0}{r},IF({1}{r}<>"",{1}{r},IF({2}{r}<>"",{2}{r},{3}{r})))'.format(
+                cpty, cpty_orig, contract, facility, r=row)
+            data_sheet["{}{}".format(cols[AGGREGATE_EXPOSURE_COLUMN], row)] = (
+                '=SUMIF(${0}$2:${0}${1},{2},${3}$2:${3}${1})'.format(
+                    cpty, len(template) + 1, group_expr, ead))
+            data_sheet["{}{}".format(cols[RETAIL_FLAG_COLUMN], row)] = (
+                '=IF(ISNUMBER(SEARCH("RETAIL",UPPER({0}{1}&""))),"Retail","Non-Retail")'.format(asset, row))
+            data_sheet["{}{}".format(cols[REG_RETAIL_FLAG_COLUMN], row)] = (
+                '=IF(AND({0}{1}="Retail",OR(UPPER({2}{1}&"")="INDIV",UPPER({2}{1}&"")="INDIVIDUAL",UPPER({2}{1}&"")="SME"),{3}{1}<={4}),"Yes","No")'.format(
+                    cols[RETAIL_FLAG_COLUMN], row, entity, cols[AGGREGATE_EXPOSURE_COLUMN], REG_RETAIL_AGGREGATE_LIMIT))
+            data_sheet["{}{}".format(cols[RW_KEY_OUTPUT_COLUMN], row)] = (
+                '=IF(OR(UPPER({pd}{r}&"")="T",UPPER({pd}{r}&"")="TRUE",UPPER({pd}{r}&"")="YES"),'
+                'IF(AND(({ead}{r}+{pro}{r})>0,{pro}{r}>={thr}*({ead}{r}+{pro}{r})),"DEFAULT_100","DEFAULT_150"),'
+                'IF({reg}{r}<>"Yes","RETAIL_OTHER",IF(OR(UPPER({pen}{r}&"")="YES",UPPER({pen}{r}&"")="T",UPPER({pen}{r}&"")="TRUE"),'
+                '"RETAIL_PENSIONER",IF(OR(UPPER({tran}{r}&"")="YES",UPPER({tran}{r}&"")="T",UPPER({tran}{r}&"")="TRUE"),'
+                '"RETAIL_TRANSACTOR","RETAIL_NONTRANSACTOR"))))'.format(
+                    pd=past_due, r=row, ead=ead, pro=ead_pro, thr=DEFAULT_PROVISION_THRESHOLD,
+                    reg=cols[REG_RETAIL_FLAG_COLUMN], pen=pensioner, tran=transactor))
+            data_sheet["{}{}".format(cols[STANDARD_RW_OUTPUT_COLUMN], row)] = (
+                '=IFERROR(INDEX({rw},MATCH({key}{r},{keys},0)),"")'.format(
+                    rw=rw_rng, key=cols[RW_KEY_OUTPUT_COLUMN], r=row, keys=key_rng))
+            data_sheet["{}{}".format(cols[CCY_MISMATCH_OUTPUT_COLUMN], row)] = (
+                '=IF(AND(OR(UPPER({ent}{r}&"")="INDIV",UPPER({ent}{r}&"")="INDIVIDUAL"),'
+                '{ccy}{r}<>"",{eccy}{r}<>"",UPPER({ccy}{r}&"")<>UPPER({eccy}{r}&""),'
+                'NOT(OR(UPPER({hed}{r}&"")="YES",UPPER({hed}{r}&"")="T",UPPER({hed}{r}&"")="TRUE"))),{mult},1)'.format(
+                    ent=entity, r=row, ccy=currency, eccy=entity_ccy, hed=hedged,
+                    mult=CCY_MISMATCH_MULTIPLIER))
+            data_sheet["{}{}".format(cols[ADJUSTED_RW_OUTPUT_COLUMN], row)] = (
+                '=MIN({0}{1}*{2}{1},{3})'.format(
+                    cols[STANDARD_RW_OUTPUT_COLUMN], row,
+                    cols[CCY_MISMATCH_OUTPUT_COLUMN], MAX_ADJUSTED_RW))
+            data_sheet["{}{}".format(cols[RWA_OUTPUT_COLUMN], row)] = (
+                '={0}{1}*{2}{1}'.format(ead, row, cols[ADJUSTED_RW_OUTPUT_COLUMN]))
+
+        for name in [STANDARD_RW_OUTPUT_COLUMN, CCY_MISMATCH_OUTPUT_COLUMN, ADJUSTED_RW_OUTPUT_COLUMN]:
+            for cell in data_sheet[cols[name]][1:]:
+                cell.number_format = "0.00%"
+        for name in ["EAD", "EAD_PRO", AGGREGATE_EXPOSURE_COLUMN, "RWA", RWA_OUTPUT_COLUMN]:
+            for cell in data_sheet[cols[name]][1:]:
+                cell.number_format = '#,##0.00;[Red](#,##0.00);-'
+
+    return stream.getvalue()
+
+# =============================================================================
+# 8. EXECUTION SCOPE
+# =============================================================================
+def load_manifest(folder):
+    try:
+        with folder.get_download_stream(SELECTION_MANIFEST_PATH) as stream:
+            return json.loads(stream.read().decode("utf-8"))
+    except Exception:
+        return None
+
+
+def selected_sheets_for(manifest, path):
+    if not manifest:
+        return None
+    selected = manifest.get("selected_sheets") or {}
+    filename = PurePosixPath(path).name
+    if isinstance(selected, dict):
+        value = selected.get(path) or selected.get(normalize_path(path)) or selected.get(filename)
+        return value if isinstance(value, list) else None
+    return selected if isinstance(selected, list) else None
+
+
+def execution_scope(data_folder):
+    available = set(list_files(data_folder))
+    manifest = load_manifest(data_folder)
+    run_id = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+
+    if manifest:
+        run_id = clean_text(manifest.get("run_id")) or run_id
+        manifest_category = normalize_token(manifest.get("category"))
+        if manifest_category and manifest_category != CATEGORY.upper():
+            raise ValueError("Selection manifest category is '{}', expected '{}'.".format(
+                manifest.get("category"), CATEGORY))
+        paths = []
+        seen = set()
+        for raw_path in manifest.get("selected_paths") or []:
+            path = normalize_path(raw_path)
+            if path in seen:
+                continue
+            if path not in available:
+                raise ValueError("Selected Retail file does not exist: {}".format(path))
+            if not supported(path):
+                raise ValueError("Selected Retail file is unsupported: {}".format(path))
+            if path.startswith("/_webapp_metadata/"):
+                continue
+            seen.add(path)
+            paths.append(path)
+        if paths:
+            return {"paths": paths, "run_id": run_id, "manifest": manifest, "mode": "webapp"}
+
+    paths = sorted(
+        path for path in available
+        if supported(path) and not path.startswith("/_webapp_metadata/")
+    )
+    if not paths:
+        raise ValueError("No supported Retail input files found in folder {}.".format(DATA_FOLDER_ID))
+    return {"paths": paths, "run_id": run_id, "manifest": manifest, "mode": "flow"}
+
+# =============================================================================
+# 9. MAIN
+# =============================================================================
+def main():
+    data_folder = dataiku.Folder(DATA_FOLDER_ID)
+    mapping_folder = dataiku.Folder(MAPPING_FOLDER_ID)
+    output_folder = dataiku.Folder(OUTPUT_FOLDER_ID)
+    template_folder = dataiku.Folder(TEMPLATE_OUTPUT_FOLDER_ID)
+    scope = execution_scope(data_folder)
+
+    successes = []
+    failures = []
+
+    for path in scope["paths"]:
+        filename = PurePosixPath(path).name
+        try:
+            sheets = selected_sheets_for(scope.get("manifest"), path)
+            source = read_source(data_folder, path, sheets)
+            mapping, mapping_source = load_mapping_for_input(data_folder, path, mapping_folder)
+            calculated = calculate_retail(source, mapping)
+
+            base = basename_without_extension(path)
+            output_name = OUTPUT_NAME_TEMPLATE.format(base=base, run_id=scope["run_id"])
+            template_name = TEMPLATE_NAME_TEMPLATE.format(base=base, run_id=scope["run_id"])
+
+            put_bytes(output_folder, output_name, write_calculated_workbook(calculated))
+            put_bytes(template_folder, template_name, build_formula_template(source, mapping))
+
+            successes.append({
+                "input": filename,
+                "rows": int(len(calculated)),
+                "mapping_source": mapping_source,
+                "output": output_name,
+                "template": template_name,
+            })
+            print("SUCCESS: {} -> {} rows".format(filename, len(calculated)))
+        except Exception as exc:
+            failures.append({"input": filename, "error": str(exc)})
+            print("FAILED: {} -> {}".format(filename, exc))
+
+    print("Successful files: {} | Failed files: {}".format(len(successes), len(failures)))
+    print("Success details: {}".format(successes))
+    if failures:
+        raise RuntimeError("One or more selected Retail files failed: {}".format(failures))
+
+
+main()
