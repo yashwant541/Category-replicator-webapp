@@ -336,7 +336,7 @@ def build_system(entries: List[Dict[str, Any]], options: Dict[str, Any]) -> Dict
     Xa, included, ainfo, sheet_masks = _align_sheets(X, Y, sheet_col, sheet_columns, out_group)
     if ainfo.get("warning"):
         warnings.append(ainfo["warning"])
-    y_known = bool(Y.map(lambda v: not is_blank(v)).values.any())
+    y_known = any(not is_blank(v) for c in Y.columns for v in Y[c])     # (DataFrame.map needs pandas>=2.1)
     if not y_known and not formulas:
         raise ValueError("The output sheet has no values (and no formulas) to learn from.")
     learner = Learner(Xa, Y, ndf, formulas, toggles, y_known, variants, sheet_col, sheet_columns)

@@ -61,9 +61,13 @@ def read_workbook(file_bytes: bytes, filename: str, report: Optional[List[Dict[s
     low = (filename or "").lower()
     out: List[Dict[str, Any]] = []
     if low.endswith((".csv", ".txt")):
-        raw = pd.read_csv(io.BytesIO(file_bytes), header=None, dtype=object,
-                          keep_default_na=False, skip_blank_lines=False, encoding_errors="replace")
-        df, hr = _rows_to_df(raw.replace("", None).values.tolist())
+        try:
+            raw = pd.read_csv(io.BytesIO(file_bytes), header=None, dtype=object, keep_default_na=False,
+                              skip_blank_lines=False, encoding_errors="replace")
+        except TypeError:                      # pandas < 1.3 has no encoding_errors
+            raw = pd.read_csv(io.BytesIO(file_bytes), header=None, dtype=object, keep_default_na=False,
+                              skip_blank_lines=False, encoding="utf-8")
+        df, hr = _rows_to_df([[None if (isinstance(c, str) and c == "") else c for c in r] for r in raw.values.tolist()])
         if not df.empty:
             out.append({"sheet": "Sheet1", "header_row": hr, "df": df, "n_formulas": 0})
         return out
