@@ -95,12 +95,12 @@
       }
       r.systems.forEach(s => box.appendChild(h("a", { class: "card", href: "#/s/" + s.id, style: "color:inherit;display:block;margin:0" }, [
         h("div", { class: "row" }, [h("h3", { text: s.name, style: "margin:0" }), h("span", { class: "spacer" }),
-          s.match != null ? h("span", { class: "pill " + (s.match >= 0.9995 ? "ok" : "warn"), text: fmtPct(s.match) + " replay" }) : null]),
+]),
         h("div", { class: "muted small", text: s.description || "" }),
         h("div", { class: "row", style: "margin-top:10px" }, [
-          h("span", { class: "pill", text: s.columns + " columns" }), h("span", { class: "pill", text: s.n_tables + " mappings" }),
+          h("span", { class: "pill", text: s.n_sheets + " sheet(s)" }), h("span", { class: "pill ok", text: s.n_formulas + " formulas" }), h("span", { class: "pill", text: s.n_tables + " mappings" }),
           s.split ? h("span", { class: "pill acc", text: "multi-sheet" }) : null,
-          s.n_review ? h("span", { class: "pill warn", text: s.n_review + " to review" }) : null]),
+          s.n_review ? h("span", { class: "pill warn", text: s.n_review + " column(s) without formula" }) : null]),
         h("div", { class: "muted small", style: "margin-top:8px", text: "Updated " + when(s.updated || s.created) })])));
     } catch (e) { clear(box); box.appendChild(h("div", { class: "note err", text: e.message })); }
   }
@@ -185,7 +185,7 @@
     const root = clear(main());
     const steps = ["1 · Setup", "2 · Files", "3 · Learn"];
     root.appendChild(h("div", { class: "head" }, [h("div", {}, [h("h1", { text: "New system" }),
-      h("div", { class: "muted", text: "Show the app one worked example; it learns the rules." })])]));
+      h("div", { class: "muted", text: "Show the app one worked example; it keeps its layout, filters and formulas as a template." })])]));
     root.appendChild(h("div", { class: "steps" }, steps.map((s, i) => h("span", { class: "step " + (B.step === i + 1 ? "on" : B.step > i + 1 ? "done" : ""), text: s }))));
 
     if (B.step === 1) {
@@ -226,11 +226,11 @@
       if (col) root.appendChild(col);
       root.appendChild(h("div", { class: "row" }, [h("button", { class: "btn ghost", text: "← Back", onclick: () => { B.step = 1; renderBuilder(); } }), h("span", { class: "spacer" }),
         h("span", { class: "muted small", text: roles.input + " input · " + roles.mapping + " mapping · " + roles.output + " output sheet(s)" }),
-        h("button", { class: "btn", text: "Learn the rules →", ...(ready && !UP_BUSY ? {} : { disabled: true }), onclick: learnNow })]));
+        h("button", { class: "btn", text: "Build the template →", ...(ready && !UP_BUSY ? {} : { disabled: true }), onclick: learnNow })]));
       return;
     }
 
-    root.appendChild(h("div", { class: "card empty" }, [h("span", { class: "spin" }), "Learning every output column… this can take a few seconds."]));
+    root.appendChild(h("div", { class: "card empty" }, [h("span", { class: "spin" }), "Reading your example and building the template…"]));
   }
 
   async function learnNow() {
@@ -263,18 +263,19 @@
 
   function renderSystem(tab) {
     const s = SYS, root = clear(main());
-    const rv = s.rules.filter(r => r.status === "unresolved" || r.status === "approx").length;
+    const nF = s.sheets.reduce((a, d) => a + d.columns.filter(c => c.kind === "formula").length, 0);
+    const rv = s.sheets.reduce((a, d) => a + d.columns.filter(c => c.kind === "empty").length, 0);
     root.appendChild(h("div", { class: "head" }, [h("div", {}, [h("h1", { text: s.name }), h("div", { class: "muted", text: s.description || "" }),
       h("div", { class: "row small", style: "margin-top:6px" }, [
-        h("span", { class: "pill " + ((s.training.replay_match || 0) >= 0.9995 ? "ok" : "warn"), text: "Replays training output at " + fmtPct(s.training.replay_match) }),
-        h("span", { class: "pill", text: s.output.columns.length + " columns" }), h("span", { class: "pill", text: Object.keys(s.tables).length + " mapping tables" }),
-        rv ? h("span", { class: "pill warn", text: rv + " column(s) to review" }) : null])]),
+        h("span", { class: "pill", text: s.sheets.length + " output sheet(s)" }), h("span", { class: "pill ok", text: nF + " formulas stored" }),
+        h("span", { class: "pill", text: Object.keys(s.tables).length + " mapping / toggle sheets" }),
+        rv ? h("span", { class: "pill warn", text: rv + " column(s) without a formula in the sample" }) : null])]),
       h("div", { class: "row" }, [
         h("button", { class: "btn ghost small", text: "Input template", onclick: () => dl("/api/systems/" + s.id + "/template") }),
-        h("button", { class: "btn ghost small", text: "Re-learn", onclick: relearn }),
+        h("button", { class: "btn ghost small", text: "Rebuild", onclick: relearn }),
         h("button", { class: "btn ghost danger small", text: "Delete", onclick: async () => { if (!confirm("Delete system '" + s.name + "'?")) return;
           await call("/api/systems/" + s.id, { method: "DELETE" }); SYS = null; location.hash = "#/"; } })])]));
-    const tabs = [["rules", "Rules"], ["run", "Run on new data"], ["filters", "Filters & outputs"], ["maps", "Mappings"], ["history", "History"]];
+    const tabs = [["rules", "Template"], ["run", "Run on new data"], ["filters", "Filters & outputs"], ["maps", "Mappings"], ["history", "History"]];
     root.appendChild(h("div", { class: "tabs" }, tabs.map(([k, l]) => h("a", { class: "tab" + (tab === k ? " on" : ""), href: "#/s/" + s.id + "/" + k, text: l }))));
     const body = h("div", {});
     root.appendChild(body);
@@ -282,7 +283,7 @@
   }
 
   async function relearn() {
-    if (!confirm("Re-learn all rules from the stored example files? Manual edits will be lost.")) return;
+    if (!confirm("Rebuild the template from the stored example files? Filter edits will be lost.")) return;
     const mode = SYS.filters.split.enabled ? "auto" : "auto";
     toast("Re-learning…");
     try { SYS = (await call("/api/systems/" + SYS.id + "/relearn", { method: "POST", json: { split: { mode } } })).system; renderSystem("rules"); toast("Done"); }
@@ -294,113 +295,38 @@
     toast(msg || "Saved");
   }
 
-  /* ---------------------------------------------------------------- rules tab */
-  function layoutCard() {
-    const s = SYS, sc = s.output.sheet_columns || {}, rules = {};
-    s.rules.forEach(r => { rules[r.name] = r; });
-    const isInput = c => { const r = rules[c]; return r && r.kind === "copy" && r.col === c; };
-    const sheets = Object.keys(sc);
-    const split = s.filters.split;
-    return h("div", { class: "card" }, [h("h2", { text: "Output sheets" }),
-      h("div", { class: "muted small", text: "Each sheet is laid out exactly like your sample: the same columns in the same order, starting in the same cell. The sample's formulas are stored as written and placed in the derived columns (only the row number moves, like filling down). The mapping and toggle sheets the formulas depend on are added to the workbook." }),
-      ...sheets.map(sh => {
-        const cols = sc[sh], inp = cols.filter(isInput), der = cols.filter(c => !isInput(c));
-        const cond = split.enabled ? ((split.sheets || []).find(x => x.name === sh) || {}).conditions : null;
-        return h("div", { style: "margin-top:12px" }, [
-          h("div", { class: "row" }, [h("b", { text: sh }), h("span", { class: "pill", text: inp.length + " input + " + der.length + " derived" }),
-            cond && cond.length ? h("span", { class: "muted small", text: "rows where " + cond.map(c => c.col + " " + c.op + " " + (Array.isArray(c.value) ? c.value.join("|") : c.value)).join(" and ") }) : null]),
-          h("div", { class: "chips", style: "margin:6px 0 0" }, [
-            ...inp.map(c => h("span", { class: "chip", text: c })),
-            ...der.map(c => h("span", { class: "chip", style: "background:var(--ok-soft);color:var(--ok);font-weight:600", title: (rules[c] || {}).description || "", text: c }))])]);
-      }),
-      h("div", { class: "row small", style: "margin-top:12px" }, [h("span", { class: "muted", text: "Also in the workbook:" }),
-        ...Object.keys(s.tables).map(t => h("span", { class: "pill warn", text: t + ((s.toggles || []).some(g => g.sheet === t) ? " (toggle)" : " (mapping)") })),
-        h("span", { class: "pill", text: "Run summary" })])]);
-  }
-
+  /* ------------------------------------------------------------- template tab */
   function tabRules(body) {
-    const s = SYS;
-    body.appendChild(layoutCard());
-    body.appendChild(h("div", { class: "card" }, [
-      h("div", { class: "row" }, [h("h2", { text: "How each output column is built", style: "margin:0" }), h("span", { class: "spacer" }),
-        h("button", { class: "btn small", text: "Check against training output", onclick: runReplay })]),
-      h("div", { class: "muted small", text: "Columns are learned in output order; later columns may use earlier ones. Edit a rule's JSON to correct it — a rule of kind \"formula\" accepts a pandas expression such as df['Amount'] * 0.05." }),
-      ...(s.warnings || []).map(w => h("div", { class: "note", text: w })),
-      h("div", { class: "scroll", style: "margin-top:10px;max-height:none" }, [rulesTable()])]));
-    if (REPLAY) body.appendChild(replayCard());
-  }
-
-  function rulesTable() {
-    const s = SYS;
-    const tb = h("tbody");
-    s.rules.forEach((r, i) => {
-      const [cls, lab] = STATUS[r.status] || ["", r.status];
-      const tr = h("tr", {}, [h("td", { text: i + 1, class: "muted" }),
-        h("td", {}, [h("b", { text: r.name }), r.disabled ? h("span", { class: "pill", text: "disabled", style: "margin-left:6px" }) : null]),
-        h("td", {}, [h("span", { class: "pill acc", text: KIND[r.kind] || r.kind })]),
-        h("td", { class: "desc", text: r.description || "" }),
-        h("td", {}, [r.match != null ? h("div", { class: "row" }, [h("div", { class: "bar " + (r.match >= .9995 ? "" : r.match >= .9 ? "warn" : "bad"), style: "width:60px" }, [h("i", { style: "width:" + (r.match * 100) + "%" })]), h("span", { class: "small", text: fmtPct(r.match) })]) : h("span", { class: "muted", text: "—" })]),
-        h("td", {}, [h("span", { class: "pill " + cls, text: lab })]),
-        h("td", { style: "white-space:nowrap" }, [
-          h("button", { class: "icon-btn", text: "↑", title: "Move up", onclick: () => move(i, -1) }), " ",
-          h("button", { class: "icon-btn", text: "↓", title: "Move down", onclick: () => move(i, 1) }), " ",
-          h("button", { class: "btn ghost small", text: "Edit", onclick: () => toggleEditor(tr, r) })])]);
-      tb.appendChild(tr);
+    const s = SYS, sp = s.filters.split;
+    body.appendChild(h("div", { class: "card" }, [h("h2", { text: "The template" }),
+      h("div", { class: "muted small", text: "Each output sheet is laid out exactly like your sample. Input columns are pasted from the input rows that pass the sheet's filter; derived columns are the sample's formulas, stored as written and filled down. Nothing is calculated by the app." }),
+      ...(s.warnings || []).map(w => h("div", { class: "note", text: w }))]));
+    s.sheets.forEach(d => {
+      const cond = sp.enabled ? ((sp.sheets || []).find(x => x.name === d.name) || {}).conditions : null;
+      const where = sp.enabled && sp.mode === "column" ? "rows where " + sp.column + " = " + ((Object.entries(sp.map || {}).find(([k, v]) => v === d.name) || [d.name])[0])
+        : (cond && cond.length ? "rows where " + cond.map(c => c.col + " " + c.op + " " + (Array.isArray(c.value) ? c.value.join(" | ") : c.value)).join(" and ") : "all rows");
+      const col = n => { let t = ""; n += 1; while (n > 0) { const m = (n - 1) % 26; t = String.fromCharCode(65 + m) + t; n = Math.floor((n - 1) / 26); } return t; };
+      body.appendChild(h("div", { class: "card" }, [
+        h("div", { class: "row" }, [h("h2", { text: d.name, style: "margin:0" }), h("span", { class: "pill acc", text: where }),
+          h("span", { class: "muted small", text: "header at row " + (d.origin.row + 1) + ", starts in column " + col(d.origin.col) })]),
+        h("div", { class: "scroll", style: "margin-top:10px;max-height:340px" }, [h("table", { class: "t" }, [
+          h("thead", {}, [h("tr", {}, ["Cell", "Column", "What goes there"].map(x => h("th", { text: x })))]),
+          h("tbody", {}, d.columns.map(c => h("tr", {}, [
+            h("td", { class: "mono", text: col(c.col) + (d.origin.row + 1) }), h("td", {}, [h("b", { text: c.name })]),
+            c.kind === "input" ? h("td", {}, [h("span", { class: "pill acc", text: "input" }), " pasted from the input column ", h("b", { text: c.source })])
+              : c.kind === "formula" ? h("td", {}, [h("span", { class: "pill ok", text: "formula" }), " ", h("span", { class: "desc", text: c.raw })])
+              : h("td", {}, [h("span", { class: "pill warn", text: "empty" }), " no formula in the sample"])])))])]),
+        (d.params || []).length ? h("div", { class: "muted small", style: "margin-top:8px", text: "Parameter cell(s) the formulas point at: " + d.params.map(p => p.cell + " = " + p.value).join(", ") }) : null]));
     });
-    return h("table", { class: "t" }, [h("thead", {}, [h("tr", {}, ["#", "Output column", "Type", "Rule", "Match", "Status", ""].map(x => h("th", { text: x })))]), tb]);
-  }
-
-  async function move(i, d) {
-    const j = i + d; if (j < 0 || j >= SYS.rules.length) return;
-    const rules = SYS.rules.slice(); const t = rules[i]; rules[i] = rules[j]; rules[j] = t;
-    await saveSystem({ rules: rules.map(r => ({ name: r.name })) }, "Order saved"); renderSystem("rules");
-  }
-
-  const META = ["name", "match", "status", "description", "source", "notes", "error", "edited"];
-  function toggleEditor(tr, r) {
-    const nxt = tr.nextSibling;
-    if (nxt && nxt.classList && nxt.classList.contains("ed")) { nxt.remove(); return; }
-    const spec = {}; Object.keys(r).forEach(k => { if (META.indexOf(k) < 0) spec[k] = r[k]; });
-    const ta = h("textarea", { spellcheck: "false" }); ta.value = JSON.stringify(spec, null, 2);
-    const dis = h("input", { type: "checkbox", ...(r.disabled ? { checked: true } : {}) });
-    const cell = h("td", { colspan: 7, style: "background:var(--surface-2)" }, [
-      h("div", { class: "muted small", text: "Kinds: copy · const · text · datepart · arith · concat · lookup · cond · learned_map · formula. Excel formula: " + (r.excel_formula || "—") }),
-      ta, h("div", { class: "row", style: "margin-top:8px" }, [h("label", { class: "small" }, [dis, " disable (output blank)"]), h("span", { class: "spacer" }),
-        h("button", { class: "btn ghost small", text: "Cancel", onclick: () => cell.parentNode.remove() }),
-        h("button", { class: "btn small", text: "Save rule", onclick: async () => {
-          let obj; try { obj = JSON.parse(ta.value); } catch (e) { return toast("Invalid JSON: " + e.message, true); }
-          if (!obj.kind) return toast("A rule needs a \"kind\"", true);
-          obj.name = r.name; obj.edited = true; if (dis.checked) obj.disabled = true;
-          const rules = SYS.rules.map(x => x.name === r.name ? obj : { name: x.name });
-          await saveSystem({ rules }, "Rule saved — run the check to see its effect"); REPLAY = null; renderSystem("rules"); } })])]);
-    tr.parentNode.insertBefore(h("tr", { class: "ed" }, [cell]), tr.nextSibling);
-  }
-
-  async function runReplay() {
-    toast("Running the system on the training input…");
-    try { const r = await call("/api/systems/" + SYS.id + "/replay", { method: "POST" }); REPLAY = r.report; SYS = r.system; renderSystem("rules"); }
-    catch (e) { toast(e.message, true); }
-  }
-
-  function replayCard() {
-    const R = REPLAY;
-    const card = h("div", { class: "card" }, [h("h2", { text: "Replay check" })]);
-    if (!R.aligned) { card.appendChild(h("div", { class: "note err", text: R.note })); return card; }
-    card.appendChild(h("div", { class: "stat" }, [h("div", {}, [h("b", { text: fmtPct(R.match) }), h("span", { text: "cells identical" })]),
-      h("div", {}, [h("b", { text: R.rows_pred + " / " + R.rows_expected }), h("span", { text: "rows produced / expected" })])]));
-    Object.keys(R.rule_errors || {}).forEach(k => card.appendChild(h("div", { class: "note err", text: k + ": " + R.rule_errors[k] })));
-    const bad = R.columns.filter(c => c.mismatches);
-    if (!bad.length) card.appendChild(h("div", { class: "note good", text: "Every column reproduces the expected output exactly." }));
-    bad.forEach(c => card.appendChild(h("details", { open: true }, [h("summary", { text: c.column + " — " + c.mismatches + " mismatches (" + fmtPct(c.match) + " match)" }),
-      h("table", { class: "t" }, [h("thead", {}, [h("tr", {}, ["Row", "Expected", "Got"].map(x => h("th", { text: x })))]),
-        h("tbody", {}, c.examples.map(e => h("tr", {}, [h("td", { text: e.row }), h("td", { text: String(e.expected) }), h("td", { text: String(e.got) })])))])])));
-    return card;
+    body.appendChild(h("div", { class: "card" }, [h("h3", { text: "Also written into every output workbook" }),
+      h("div", { class: "row small" }, [...Object.keys(s.tables).map(t => h("span", { class: "pill warn", text: t + ((s.toggles || []).some(g => g.sheet === t) ? " (toggle)" : " (mapping)") })),
+        h("span", { class: "pill", text: "Run summary" })])]));
   }
 
   /* ---------------------------------------------------------------- run tab */
   function tabRun(body) {
     const s = SYS;
-    const files = { in: [], map: [], exp: [] }; let live = true; const tog = {};
+    const files = { in: [], map: [] }; const tog = {};
     const togBox = (s.toggles || []).length ? h("div", { class: "card", style: "margin:12px 0 0;box-shadow:none;background:var(--surface-2)" }, [
       h("h3", { text: "Toggles used by the formulas" }),
       h("div", { class: "muted small", text: "Taken from the Toggle sheet of your mapping (attach an updated mapping to change them for good) — or override for this run only:" }),
@@ -424,8 +350,7 @@
     const btn = h("button", { class: "btn", text: "Run", onclick: async () => {
       if (!files.in.length) return toast("Add at least one input file", true);
       const fd = new FormData();
-      files.in.forEach(f => fd.append("files", f)); files.map.forEach(f => fd.append("mappings", f)); files.exp.forEach(f => fd.append("expected", f));
-      if (live) fd.append("live_formulas", "1");
+      files.in.forEach(f => fd.append("files", f)); files.map.forEach(f => fd.append("mappings", f));
       if (Object.keys(tog).length) fd.append("toggles", JSON.stringify(tog));
       btn.disabled = true; btn.textContent = "Running…";
       try { LAST_RUN = (await call("/api/systems/" + s.id + "/run", { method: "POST", body: fd })).run; showRun(out, LAST_RUN); }
@@ -433,13 +358,12 @@
       btn.disabled = false; btn.textContent = "Run";
     } });
     body.appendChild(h("div", { class: "card" }, [h("h2", { text: "Run on new data" }),
-      h("div", { class: "muted small", text: "Upload new input in the same layout (" + s.input.required.slice(0, 6).join(", ") + (s.input.required.length > 6 ? "…" : "") + "). The system builds every derived column" + (s.filters.split.enabled ? " and splits the result into sheets" : "") + "." }),
-      h("div", { class: "grid g3", style: "margin-top:12px" }, [zone("in", "Input file(s)", "Drop new input here", true),
-        zone("map", "Updated mappings (optional)", "Replace stored mapping tables for this run", true),
-        zone("exp", "Expected output (optional)", "Compare the result to a known answer", false)]),
+      h("div", { class: "muted small", text: "Upload new input in the same layout (" + s.input.required.slice(0, 6).join(", ") + (s.input.required.length > 6 ? "…" : "") + "). The system builds every derived column" + (s.filters.split.enabled ? " and splits the rows into the sample's sheets" : "") + "." }),
+      h("div", { class: "grid g2", style: "margin-top:12px" }, [zone("in", "Input file(s)", "Drop new input here", true),
+        zone("map", "Updated mappings / toggles (optional)", "Replace the stored mapping or Toggle sheets for this run", true)]),
       togBox,
       h("div", { class: "row", style: "margin-top:14px" }, [
-        h("label", { class: "small" }, [h("input", { type: "checkbox", checked: true, onchange: e => { live = e.target.checked; } }), " Write the formulas into the output cells (untick for plain values)"]),
+        h("span", { class: "muted small", text: "The output holds your sample's formulas; Excel calculates them when the file is opened." }),
         h("span", { class: "spacer" }), btn])]));
     body.appendChild(out);
     if (LAST_RUN && LAST_RUN.system === s.id) showRun(out, LAST_RUN);
@@ -452,20 +376,10 @@
       h("div", { class: "stat", style: "margin-top:12px" }, [h("div", {}, [h("b", { text: run.input_rows }), h("span", { text: "input rows" })]),
         h("div", {}, [h("b", { text: run.rows }), h("span", { text: "output rows" })]),
         h("div", {}, [h("b", { text: Object.keys(run.sheets).length }), h("span", { text: "sheet(s)" })]),
-        run.compare && run.compare.aligned ? h("div", {}, [h("b", { text: fmtPct(run.compare.match) }), h("span", { text: "match vs expected" })]) : null])]);
+])]);
     if ((run.toggles || []).length) card.appendChild(h("div", { class: "note good", text: "Toggles used: " + run.toggles.map(t => t.name + " = " + t.value).join(", ") }));
     (run.notes || []).forEach(n => card.appendChild(h("div", { class: "note", text: n })));
     Object.keys(run.rule_errors || {}).forEach(k => card.appendChild(h("div", { class: "note err", text: k + ": " + run.rule_errors[k] })));
-    if (run.compare) {
-      if (!run.compare.aligned) card.appendChild(h("div", { class: "note err", text: run.compare.note }));
-      else {
-        const bad = run.compare.columns.filter(c => c.mismatches);
-        if (!bad.length) card.appendChild(h("div", { class: "note good", text: "Identical to the expected output." }));
-        bad.forEach(c => card.appendChild(h("details", {}, [h("summary", { text: "vs expected · " + c.column + ": " + c.mismatches + " differences" }),
-          h("table", { class: "t" }, [h("thead", {}, [h("tr", {}, ["Row", "Expected", "Got"].map(x => h("th", { text: x })))]),
-            h("tbody", {}, c.examples.map(e => h("tr", {}, [h("td", { text: e.row }), h("td", { text: String(e.expected) }), h("td", { text: String(e.got) })])))])])));
-      }
-    }
     const names = Object.keys(run.preview);
     const holder = h("div", {});
     const tabs = h("div", { class: "tabs", style: "margin-top:14px" });
@@ -486,7 +400,7 @@
   /* ------------------------------------------------------------ filters tab */
   function tabFilters(body) {
     const F = JSON.parse(JSON.stringify(SYS.filters));
-    const cols = SYS.input.columns.concat(SYS.output.columns.filter(c => SYS.input.columns.indexOf(c) < 0));
+    const cols = SYS.input.columns;
     function condEditor(list, rerender) {
       const wrap = h("div", {});
       list.forEach((c, i) => {
@@ -544,8 +458,8 @@
     const names = Object.keys(SYS.tables);
     if (!names.length) { body.appendChild(h("div", { class: "card empty", text: "This system has no mapping tables — every column is built from the input itself." })); return; }
     const used = {};
-    SYS.rules.forEach(r => { const t = r.kind === "lookup" ? [r.table] : (r.kind === "arith" ? JSON.stringify(r.expr).match(/"table":"([^"]+)"/g) : null);
-      (t || []).forEach(x => { const n = x.replace(/"table":"|"/g, ""); (used[n] = used[n] || []).push(r.name); }); });
+    SYS.sheets.forEach(d => d.columns.forEach(c => { if (c.kind === "formula") (c.raw.match(/(?:'[^']+'|[A-Za-z_][A-Za-z0-9_.]*)!/g) || []).forEach(x => {
+      const n = x.replace(/!$/, "").replace(/^'|'$/g, ""); (used[n] = used[n] || []); if (used[n].indexOf(d.name + "." + c.name) < 0) used[n].push(d.name + "." + c.name); }); }));
     names.forEach(n => {
       const t = SYS.tables[n];
       body.appendChild(h("div", { class: "card" }, [h("div", { class: "row" }, [h("h2", { text: n, style: "margin:0" }), h("span", { class: "pill", text: t.records.length + " rows" }), h("span", { class: "spacer" }),

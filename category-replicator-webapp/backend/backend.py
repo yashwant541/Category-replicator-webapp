@@ -168,26 +168,18 @@ def api_relearn(sid):
     return ok(system=service.relearn(store(), sid, {"split": body.get("split") or {"mode": "auto"}}))
 
 
-@app.route("/api/systems/<sid>/replay", methods=["POST"])
-@guarded
-def api_replay(sid):
-    return ok(report=service.replay(store(), sid), system=service.get_system(store(), sid))
-
-
 @app.route("/api/systems/<sid>/run", methods=["POST"])
 @guarded
 def api_run(sid):
     inputs = _files("files")
     if not inputs:
         raise ValueError("Upload at least one input file.")
-    exp = _files("expected")
     import json as _json
     try:
         tv = _json.loads(request.form.get("toggles") or "{}")
     except ValueError:
         tv = {}
-    res = service.run_system(store(), sid, inputs, _files("mappings"), exp[0] if exp else None,
-                             request.form.get("live_formulas") in ("1", "true", "on"), tv or None)
+    res = service.run_system(store(), sid, inputs, _files("mappings"), tv or None)
     return ok(run=res)
 
 

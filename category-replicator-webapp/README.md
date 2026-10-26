@@ -1,60 +1,34 @@
 # Category Replicator (Dataiku Standard webapp)
 
-Show the app **one worked example** — input file(s), mapping file(s) and the output you expect — and it
-learns how every output column is built. Run the same *system* (category) on new data and it rebuilds the
-output exactly, optionally split into several sheets by a filter.
+Show the app **one worked example** — input file(s), mapping/toggle sheets and the output workbook you expect — and it keeps a
+**template**. Give it new input and it produces the same workbook again.
 
-## What it learns (per output column)
-| Kind | Example |
-|---|---|
-| Excel formula (output file has live formulas) | `=VLOOKUP(B2,Weights!$A$2:$B$4,2,FALSE)` → translated & replayed |
-| Copy / constant | `[ID]`, `"EUR"` |
-| Mapping lookup (exact, 2-column key, approximate/band) | `Rates.Rate where Tier = [Tier]` |
-| Maths | `ROUND([Amount] * [Rate], 2)`, `[Amount]*(1-[Crm])`, `[Fee]/[Amount]`, sums, max/min, looked-up operands |
-| Join text | `[Region] & "-" & [ID]` |
-| IF / bands | `IF([Amount] >= 1000, "High", "Low")` (round thresholds are picked) |
-| Text / date parts | `LOWER([Tier])`, `year of [Date]` |
-| Learned map | value → value table, when nothing simpler explains it |
+## What a template is (nothing is calculated or guessed)
+For every output sheet of your sample it remembers
 
-Every rule is validated by running the **same** engine that production runs use, so what is learned is
-what is replayed. A *replay check* re-runs the system on the training input and diffs it with your
-expected output (per column, with example mismatches).
+1. **Layout** — exactly like the sample: same columns in the same order, same header row, same first column, same gaps.
+2. **Input columns** — pasted as values from the input rows that pass the sheet's **filter**.
+3. **Derived columns** — the header + the sample's formula, **stored verbatim** and filled down (only the row number moves, like
+   Excel's fill-down; `$`-anchored refs, ranges, sheet names and text are never touched).
+4. **Parameter cells** a formula points at (e.g. `$G$1`), written back at the same address.
+5. **Mapping and Toggle sheets** — copied into every output workbook (a Toggle sheet keeps its exact cells; its Yes/No value
+   comes from the updated mapping you attach to a run, or from a per-run override on the Run tab).
+6. **Filters** — an input filter (when the sample has fewer rows than the input) and which input rows each sheet holds. They are
+   worked out from the sample **on input columns only**, shown on the *Filters & outputs* tab, and editable.
 
-Also detected automatically: an **input filter** (output has fewer rows than input) and a **multi-sheet
-split** (one output sheet per value of a column). Both are editable under *Filters & outputs*; the split
-can also be set up front in the wizard (single / auto-detect / by column / custom filters per sheet).
+Derived columns are never computed by the app: the output cells contain the formulas and Excel calculates them when the file is
+opened. A derived column with **no formula in the sample** (values only) stays empty and is flagged.
 
-## Deploy in Dataiku (short version — full checklist in DEPLOY.md; one-file backend: `backend_single.py`, rebuilt with `python build_single.py`)
-1. Project → **Libraries → python/**: copy the whole `python-lib/` contents (`replicator_formulas/` and `replicator/`).
-2. Create a **managed folder** for storage; set the project variable `REPLICATOR_FOLDER` to its id
-   (or edit `FOLDER_FALLBACK` in `replicator/store.py`).
-3. New **Standard webapp** → paste `frontend/body.html`, `frontend/style.css`, `frontend/app.js`
-   and `backend/backend.py` into the HTML / CSS / JS / Python panes. Restart the backend.
-4. After any upgrade replace the **whole** `python-lib/` and restart the backend.
-
-Local preview (no Dataiku): `python dev/serve.py` → http://localhost:5181 (sample files are written to `dev/samples/`).
-Tests: `cd tests && python -m pytest -q`.
+## Deploy in Dataiku
+See **DEPLOY.md**. In short: paste `frontend/body.html`, `style.css`, `app.js` and **`backend_single.py`** (rebuilt with
+`python build_single.py`) into the webapp panes, set `REPLICATOR_FOLDER` (managed folder name/id) at the top of the Python pane,
+restart the backend.
 
 ## Using it
-1. **New system** → name, how many outputs → upload input / mapping / expected output. Each sheet gets a role
-   (Input / Mapping / Expected output / Ignore); a workbook can mix roles; several input sheets with the same
-   columns are stacked.
-2. Review the **Rules** tab. Anything amber/red can be corrected by editing the rule JSON
-   (kind `formula` accepts a pandas expression such as `df['Amount'] * 0.05`). Rules can be reordered.
-3. **Run on new data**: drop new input (same layout). Optionally attach updated mapping files (matched by
-   sheet name) and an expected output to compare. Download the `.xlsx` (one sheet per split + `Run summary`).
-   "Live Excel formulas (beta)" writes formulas instead of values and embeds the mapping sheets.
+1. **New system** → name → upload input / mapping / expected output (each sheet gets a role you can change; a workbook may mix roles;
+   mapping/toggle sheets inside the output file are recognised).
+2. **Template** tab shows every sheet: cell, column, "input" (pasted) or "formula" (the stored text).
+3. **Run on new data** → drop new input → download the `.xlsx`.
 
-## Limits / notes
-- Learning needs enough rows for a pattern to be unambiguous; constants and thresholds are inferred from data.
-- Output files saved by tools that don't store cached formula results (e.g. openpyxl) still work: the
-  formulas are used as-is (status *From formula*, no match % since there are no values to compare).
-- Rows are matched between input and output by order, or by an identifying column carried into the output.
-- Multi-key lookups and approximate (band) lookups are values-only in live-formula mode.
-
-## Dummy data for trying it out
-`python dev/make_dummy_data.py` writes `dev/sample_data/` (already generated): loan exposures split into 4 input sheets
-(Retail_EMEA, Retail_APAC, Corporate_Global, SME_Global), a 4-sheet mapping workbook (Ratings, Products, Countries, FX),
-and an expected output where **each sheet has its own derived columns** (live formulas with cached values, plus the
-mapping sheets). Upload files 1 → input, 2 → mapping, 3 → expected output; then run the system on 4 and compare to 5.
-Output sheets with different columns are supported: each keeps its own derived columns and formulas.
+Local preview: `python dev/serve.py` → http://localhost:5181. Sample data: `dev/sample_data/` (`python dev/make_dummy_data.py`).
+Tests: `cd tests && python -m pytest -q`.

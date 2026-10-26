@@ -19,12 +19,12 @@ No project-library upload needed: `backend_single.py` embeds everything (verifie
 ## Smoke test (5 min)
 - [ ] Open the webapp: top bar shows `engine 2026.10a`. If it shows nothing, the backend didn't start — check the backend log.
 - [ ] `<webapp-url>/api/health` (via the backend URL) returns `"storage": "DataikuStore"`. `LocalStore` means the variable isn't set.
-- [ ] **New system** → upload your input, mapping and expected-output files → *Learn the rules*. Check the pill "Replays training output at 100%".
-- [ ] **Run on new data** with a second input (attach its expected output to see the match %). Download the `.xlsx`.
+- [ ] **New system** → upload your input, mapping and expected-output files → *Build the template*. Open the **Template** tab: every output sheet should list its input columns and its formulas.
+- [ ] **Run on new data** with a second input. Download the `.xlsx`: formulas in the derived columns, mapping/Toggle sheets included.
 - [ ] Reopen the webapp in a new tab: the system is still listed (persisted in the folder).
 
 ## Upgrading
-Rebuild with `python build_single.py`, paste the new `backend_single.py` over the Python pane, restart the backend. Stored systems stay valid; use **Re-learn** on a system if learning logic changed (this discards manual rule edits).
+Rebuild with `python build_single.py`, paste the new `backend_single.py` over the Python pane, restart the backend. Systems saved by older builds must be **Rebuilt** (button on the system page) or re-created: the template format changed.
 
 ## Troubleshooting
 | Symptom | Cause / fix |
@@ -33,7 +33,7 @@ Rebuild with `python build_single.py`, paste the new `backend_single.py` over th
 | `ModuleNotFoundError: replicator_formulas` / `replicator` | You pasted `backend/backend.py` instead of `backend_single.py` (or didn't upload `python-lib/`). |
 | Upload fails / very large files | Backend limit is 200 MB per file; Dataiku/nginx may impose a lower one. |
 | "no sheet has the expected input columns" | Run input is missing columns the rules read; use **Input template** on the system page. |
-| Column marked *Needs a rule* | Not enough examples to infer it; edit the rule JSON (e.g. `{"kind":"formula","pandas_expr":"df['Amount']*0.05"}`) and run the replay check. |
-| Live-formula download shows blanks in a viewer | Beta mode writes formulas without cached values; open in Excel (it calculates on load). |
+| A derived column is empty | Your sample had values, not a formula, in that column - the app only replays formulas. Put the formula in the sample and rebuild. |
+| Derived cells look blank in a viewer | The workbook holds formulas without results; open it in Excel (it calculates on load). |
 
 Not yet exercised: running inside a real Dataiku instance (only the local Flask harness and the single-file build were tested).

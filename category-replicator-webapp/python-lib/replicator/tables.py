@@ -51,6 +51,7 @@ def _rows_to_df(rows: List[List[Any]]) -> Tuple[pd.DataFrame, int]:
             if any(not is_blank(c) for c in r)]
     df = pd.DataFrame(data, columns=headers, dtype=object)
     df.attrs["col_offset"] = int(min(keep)) if keep else 0
+    df.attrs["col_idx"] = [int(k) for k in keep]
     return df, hr
 
 
@@ -134,8 +135,16 @@ def read_workbook(file_bytes: bytes, filename: str, report: Optional[List[Dict[s
         if unc and report is not None:
             report.append({"sheet": name, "issue": "%d of %d formula cell(s) have no saved result and read as blank "
                            "- open the file in Excel and save it, then upload again" % (unc, nf)})
+        fcells: Dict[str, Dict[str, Any]] = {}
+        if name in needs_values:
+            for j, k in enumerate(df.attrs.get("col_idx", [])):
+                for ri in range(hr + 1, len(frows)):
+                    v = frows[ri][k] if k < len(frows[ri]) else None
+                    if isinstance(v, str) and v.startswith("="):
+                        fcells[str(df.columns[j])] = {"raw": v, "row": ri + 1}      # verbatim text, 1-based Excel row
+                        break
         out.append({"sheet": name, "header_row": hr, "df": df, "n_formulas": nf, "col_offset": df.attrs.get("col_offset", 0),
-                    "grid": grid})
+                    "col_idx": df.attrs.get("col_idx", []), "formula_cells": fcells, "grid": grid})
     return out
 
 

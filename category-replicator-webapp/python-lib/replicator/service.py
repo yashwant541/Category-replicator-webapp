@@ -116,7 +116,8 @@ def _entries(store, files: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 continue
             out.append({"file": f["name"], "sheet": s["sheet"], "role": role, "df": s["df"],
                         "header_row": s["header_row"], "n_formulas": s["n_formulas"], "bytes": data,
-                        "col_offset": s.get("col_offset", 0), "grid": s.get("grid")})
+                        "col_offset": s.get("col_offset", 0), "grid": s.get("grid"),
+                        "col_idx": s.get("col_idx"), "formula_cells": s.get("formula_cells")})
     return out
 
 
@@ -146,14 +147,15 @@ def list_systems(store) -> List[Dict[str, Any]]:
 
 
 def system_card(s: Dict[str, Any]) -> Dict[str, Any]:
-    rules = s.get("rules", [])
-    bad = [r for r in rules if r.get("status") in ("unresolved", "approx")]
+    sheets = s.get("sheets", [])
+    n_formula = sum(1 for d in sheets for c in d["columns"] if c["kind"] == "formula")
+    n_empty = sum(1 for d in sheets for c in d["columns"] if c["kind"] == "empty")
     sp = s.get("filters", {}).get("split", {})
     return {"id": s["id"], "name": s["name"], "description": s.get("description", ""),
             "created": s.get("created"), "updated": s.get("updated"),
-            "n_rules": len(rules), "n_review": len(bad), "n_tables": len(s.get("tables", {})),
-            "split": bool(sp.get("enabled")), "match": (s.get("training") or {}).get("replay_match"),
-            "columns": len(s.get("output", {}).get("columns", []))}
+            "n_sheets": len(sheets), "n_formulas": n_formula, "n_review": n_empty,
+            "n_tables": len(s.get("tables", {})), "split": bool(sp.get("enabled")),
+            "columns": sum(len(d["columns"]) for d in sheets)}
 
 
 def _tslug(name: str) -> str:
@@ -165,8 +167,8 @@ def get_system(store, sid: str) -> Dict[str, Any]:
     s = get_json(store, f"systems/{sid}/system.json")
     if s is None:
         raise KeyError("system not found")
-    if "rules" not in s:
-        s["rules"] = (get_json(store, f"systems/{sid}/rules.json") or {}).get("rules", [])
+    if "sheets" not in s:
+        s["sheets"] = (get_json(store, f"systems/{sid}/template.json") or {}).get("sheets", [])
     if "tables" not in s:  # (older systems kept everything inline - handled by the `in` checks)
         s["tables"] = {}
         for name, fn in (s.get("table_files") or {}).items():
@@ -180,7 +182,7 @@ def save_system(store, s: Dict[str, Any]) -> None:
     """Readable layout in the folder:
         index.json                       one card per system (fast home page)
         systems/<id>/system.json         name, input/output layout, filters, toggles, training info
-        systems/<id>/rules.json          every column rule (formulas, lookups, ...)
+        systems/<id>/template.json       every output sheet: its columns, formulas, parameter cells
         systems/<id>/tables/<name>.json  one file per mapping table (rewritten only when changed)
     """
     import hashlib
@@ -199,9 +201,9 @@ def save_system(store, s: Dict[str, Any]) -> None:
     for old in set(hashes) - set(tables):
         store.delete(f"{base}/tables/{_tslug(old)}.json")
         hashes.pop(old, None)
-    lean = {k: v for k, v in s.items() if k not in ("rules", "tables")}
+    lean = {k: v for k, v in s.items() if k not in ("sheets", "tables")}
     lean["table_files"], lean["table_hashes"] = files, hashes
-    put_json(store, f"{base}/rules.json", {"rules": s.get("rules", [])}, indent=1)
+    put_json(store, f"{base}/template.json", {"sheets": s.get("sheets", [])}, indent=1)
     put_json(store, f"{base}/system.json", lean, indent=1)
     idx = _read_index(store)
     idx["systems"][sid] = system_card(s)
@@ -216,73 +218,29 @@ def delete_system(store, sid: str) -> None:
     put_json(store, INDEX, idx)
 
 
-def _training_frames(store, s: Dict[str, Any]) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    tr = get_json(store, f"systems/{s['id']}/training.json")
-    if not tr:
-        raise ValueError("No training files stored for this system.")
-    es = _entries(store, tr["files"])
-    ins = [e for e in es if e["role"] == "input"]
-    outs = [e for e in es if e["role"] == "output"]
-    cols = s["input"]["columns"]
-    same = [e for e in ins if {nk(c) for c in e["df"].columns} == {nk(c) for c in cols if c != engine.SRC}]
-    frames = []
-    for e in same or [ins[0]]:
-        f = canonical_columns(e["df"], cols).copy()
-        if engine.SRC in cols:
-            f[engine.SRC] = e["sheet"]
-        frames.append(f)
-    X = pd.concat(frames, ignore_index=True)
-    ocols = s["output"]["columns"]
-    Y_sheets = {e["sheet"]: canonical_columns(e["df"], ocols) for e in outs}
-    Y = pd.concat(list(Y_sheets.values()), ignore_index=True)
-    return X, Y, Y_sheets
-
-
-def replay(store, sid: str, persist: bool = True) -> Dict[str, Any]:
-    s = get_system(store, sid)
-    X, Y, Y_sheets = _training_frames(store, s)
-    res = engine.replay_training(s, X, Y, Y_sheets)
-    if persist:
-        s.setdefault("training", {})["replay_match"] = res.get("match")
-        s["training"]["replay_cols"] = {c["column"]: c["match"] for c in res.get("columns", [])}
-        save_system(store, s)
-    return res
-
-
 def create_system(store, did: str, options: Dict[str, Any]) -> Dict[str, Any]:
     d = get_draft(store, did)
-    es = _entries(store, d["files"])
-    system = engine.build_system(es, options)
+    system = engine.build_system(_entries(store, d["files"]), options)
     sid = system["id"]
-    # move the draft files under the system so it can be re-learned / replayed later
-    files = []
+    files = []                       # keep the example files with the system so it can be re-learned later
     for f in d["files"]:
-        data = store.get(f["path"])
         newp = f"systems/{sid}/training/{f['fid']}_{_slug(f['name'])}"
-        store.put(newp, data)
+        store.put(newp, store.get(f["path"]))
         files.append({**f, "path": newp})
     put_json(store, f"systems/{sid}/training.json", {"files": files})
     delete_prefix(store, f"drafts/{did}/")
     save_system(store, system)
-    try:
-        replay(store, sid)
-    except Exception as exc:  # noqa: BLE001
-        system = get_system(store, sid)
-        system["warnings"].append(f"Replay check failed: {exc}")
-        save_system(store, system)
     return get_system(store, sid)
 
 
 def relearn(store, sid: str, options: Dict[str, Any]) -> Dict[str, Any]:
     s = get_system(store, sid)
     tr = get_json(store, f"systems/{sid}/training.json")
-    es = _entries(store, tr["files"])
     opts = {"name": s["name"], "description": s.get("description", ""), "id": sid}
     opts.update(options or {})
-    new = engine.build_system(es, opts)
+    new = engine.build_system(_entries(store, tr["files"]), opts)
     new["created"] = s.get("created", new["created"])
     save_system(store, new)
-    replay(store, sid)
     return get_system(store, sid)
 
 
@@ -291,23 +249,9 @@ def update_system(store, sid: str, patch: Dict[str, Any]) -> Dict[str, Any]:
     for k in ("name", "description"):
         if k in patch:
             s[k] = str(patch[k])
-    if "rules" in patch:
-        old = {r["name"]: r for r in s["rules"]}
-        order = []
-        for r in patch["rules"]:
-            if r["name"] in old:
-                if r.get("edited"):
-                    merged = {k: v for k, v in r.items() if k != "edited"}
-                    merged.update(source="manual", status="manual", match=None)
-                else:
-                    merged = dict(old[r["name"]])
-                order.append(merged)
-        s["rules"] = order
-        s["output"]["columns"] = [r["name"] for r in order]
-    if "filters" in patch:
-        s["filters"] = patch["filters"]
-    if "toggles" in patch:
-        s["toggles"] = patch["toggles"]
+    for k in ("filters", "toggles"):
+        if k in patch:
+            s[k] = patch[k]
     if "tables" in patch:  # replace mapping tables (e.g. refreshed rates)
         for n, spec in patch["tables"].items():
             s["tables"][n] = spec
@@ -316,41 +260,36 @@ def update_system(store, sid: str, patch: Dict[str, Any]) -> Dict[str, Any]:
     return s
 
 
-# ========================================================================= runs
 def _read_inputs(system: Dict[str, Any], files: List[Tuple[str, bytes]]
                  ) -> Tuple[pd.DataFrame, List[str], List[Dict[str, Any]]]:
     cols = system["input"]["columns"]
     want = {nk(c) for c in cols if c != engine.SRC}
-    req = {nk(c) for c in system["input"].get("required", []) if c != engine.SRC} or want
-    frames, used, notes = [], [], []
+    req = {nk(c) for c in system["input"].get("required", []) if c != engine.SRC}
+    frames, used = [], []
     for name, data in files:
-        sheets = read_workbook(data, name)
         scored = []
-        for s in sheets:
+        for s in read_workbook(data, name):
             have = {nk(c) for c in s["df"].columns}
-            scored.append((len(req & have) / max(1, len(req)), s))
-        scored.sort(key=lambda t: -t[0])
-        good = [s for sc, s in scored if sc >= 0.999 and len(s["df"])]
+            scored.append((len(want & have) / max(1, len(want)), req <= have, s))
+        good = [s for sc, ok, s in scored if sc >= 0.6 and ok and len(s["df"])]
         if not good:
-            best = scored[0] if scored else None
-            miss = sorted(req - {nk(c) for c in best[1]["df"].columns}) if best else []
-            raise ValueError(f"{name}: no sheet has the expected input columns "
+            best = max(scored, key=lambda t: t[0]) if scored else None
+            miss = sorted((want | req) - {nk(c) for c in best[2]["df"].columns}) if best else []
+            raise ValueError(f"{name}: no sheet looks like the input this system was built from "
                              f"(missing e.g. {', '.join(miss[:6])}).")
         multi = engine.SRC in cols
-        for s in (good if multi else good[:1]):
+        for s in (good if multi else sorted(good, key=lambda x: -len(x["df"]))[:1]):
             f = canonical_columns(s["df"], cols)
             if multi:   # the input's own sheets are the split; keep each row's sheet name
                 f = f.copy()
                 f[engine.SRC] = s["sheet"]
             frames.append(f)
             used.append({"file": name, "sheet": s["sheet"], "rows": int(len(s["df"]))})
-    return pd.concat(frames, ignore_index=True), notes, used
+    return pd.concat(frames, ignore_index=True), [], used
 
 
 def run_system(store, sid: str, input_files: List[Tuple[str, bytes]],
                mapping_files: Optional[List[Tuple[str, bytes]]] = None,
-               expected_file: Optional[Tuple[str, bytes]] = None,
-               live_formulas: bool = False,
                toggle_values: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
     s = get_system(store, sid)
     df, _, used = _read_inputs(s, input_files)
@@ -362,41 +301,29 @@ def run_system(store, sid: str, input_files: List[Tuple[str, bytes]],
                     override[tname] = sh["df"]
     res = engine.apply_system(s, df, override, toggle_values)
     notes = list(res["notes"])
-    excel_cols = [r["name"] for r in s["rules"] if r.get("excel_only")]
-    if excel_cols:
-        notes.append("Calculated by Excel itself (formula kept exactly as in your sample): " + ", ".join(excel_cols) +
-                     (". Values appear when the workbook is opened in Excel." if live_formulas else
-                      ". These columns stay EMPTY in a values-only output - write the formulas to get them."))
     if override:
         notes.append("Mapping tables replaced for this run: " + ", ".join(override))
+    empty = [c["name"] for d in s["sheets"] for c in d["columns"] if c["kind"] == "empty"]
+    if empty:
+        notes.append("No formula was found in your sample for: " + ", ".join(dict.fromkeys(empty)) + " - left empty.")
     tg = {t["name"]: t.get("value") for t in res["toggles"]}
-    summary = [("Toggles used", ", ".join("%s = %s" % kv for kv in tg.items()) or "none"), ("Input files", [f"{u['file']} / {u['sheet']} ({u['rows']} rows)" for u in used])]
+    summary = [("Toggles used", ", ".join("%s = %s" % kv for kv in tg.items()) or "none"),
+               ("Input files", [f"{u['file']} / {u['sheet']} ({u['rows']} rows)" for u in used])]
     if notes:
         summary.append(("Notes", notes))
-    cmp_ = None
-    if expected_file:
-        ex = read_workbook(*(expected_file[1], expected_file[0]))
-        ocols = s["output"]["columns"]
-        ysh = {x["sheet"]: canonical_columns(x["df"], ocols) for x in ex
-               if len({nk(c) for c in x["df"].columns} & {nk(c) for c in ocols}) >= max(1, len(ocols) // 2)}
-        if ysh:
-            if len(ysh) == 1 and len(res["sheets"]) == 1:
-                cmp_ = engine.compare_frames(next(iter(res["sheets"].values())), next(iter(ysh.values())))
-            else:
-                cmp_ = engine.compare_sheets(res["sheets"], ysh)
-            summary.append(("Match vs expected output", f"{cmp_.get('match', 0) * 100:.2f}%" if cmp_.get("aligned") else cmp_.get("note")))
     tables = engine.tables_to_frames(s, override)
-    data = engine.write_workbook(s, res["sheets"], res["work"], summary, live_formulas, tables, res["toggles"])
+    data = engine.write_workbook(s, res["sheets"], summary, tables, res["toggles"])
     rid = dt.datetime.utcnow().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:4]
     store.put(f"runs/{sid}/{rid}/output.xlsx", data)
     preview = {}
-    for sn, f in res["sheets"].items():
+    for sn, item in res["sheets"].items():
+        f = item["df"]
         preview[sn] = {"rows": int(len(f)), "headers": list(map(str, f.columns)),
+                       "kinds": [c["kind"] for c in item["def"]["columns"]],
                        "data": [[jsonable(v) for v in r] for r in f.head(25).itertuples(index=False, name=None)]}
     meta = {"run_id": rid, "system": sid, "created": _now(), "rows": int(res["rows"]),
             "input_rows": int(res["input_rows"]), "sheets": {k: v["rows"] for k, v in preview.items()},
-            "notes": notes, "rule_errors": res["rule_errors"], "inputs": used,
-            "live_formulas": bool(live_formulas), "compare": cmp_, "toggles": res["toggles"],
+            "notes": notes, "inputs": used, "toggles": res["toggles"],
             "filename": f"{_slug(s['name'])}_{rid}.xlsx"}
     put_json(store, f"runs/{sid}/{rid}/meta.json", meta)
     return {**meta, "preview": preview}

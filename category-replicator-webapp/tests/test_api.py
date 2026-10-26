@@ -35,7 +35,6 @@ def test_full_flow():
     r = c.post(f"/api/drafts/{did}/learn", json={"name": "Demo cat"}).get_json()
     assert r["success"], r
     s = r["system"]
-    assert s["training"]["replay_match"] == 1.0, s["training"]
     sid = s["id"]
     assert c.get("/api/systems").get_json()["systems"][0]["name"] == "Demo cat"
     inp2, *_ = make_case(n=30, seed=5)
@@ -58,7 +57,7 @@ def test_full_flow():
     bio = io.BytesIO()
     bad.save(bio)
     r = upload(c, f"/api/systems/{sid}/run", "bad.xlsx", bio.getvalue())
-    assert not r["success"] and "expected input columns" in r["error"]
+    assert not r["success"] and "no sheet looks like the input" in r["error"]
 
 
 def test_uncached_formula_mapping_sheet_is_reported():
