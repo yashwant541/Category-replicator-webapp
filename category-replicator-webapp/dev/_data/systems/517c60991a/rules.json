@@ -1,0 +1,262 @@
+{
+ "rules": [
+  {
+   "kind": "copy",
+   "col": "Transaction_ID",
+   "source": "inferred",
+   "name": "Transaction_ID",
+   "match": 1.0,
+   "status": "ok",
+   "description": "Copy of [Transaction_ID]"
+  },
+  {
+   "kind": "copy",
+   "col": "Transaction_Date",
+   "source": "inferred",
+   "name": "Transaction_Date",
+   "match": 1.0,
+   "status": "ok",
+   "description": "Copy of [Transaction_Date]"
+  },
+  {
+   "kind": "copy",
+   "col": "Employee_ID",
+   "source": "inferred",
+   "name": "Employee_ID",
+   "match": 1.0,
+   "status": "ok",
+   "description": "Copy of [Employee_ID]"
+  },
+  {
+   "kind": "copy",
+   "col": "Employee_Name",
+   "source": "inferred",
+   "name": "Employee_Name",
+   "match": 1.0,
+   "status": "ok",
+   "description": "Copy of [Employee_Name]"
+  },
+  {
+   "kind": "copy",
+   "col": "Department",
+   "source": "inferred",
+   "name": "Department",
+   "match": 1.0,
+   "status": "ok",
+   "description": "Copy of [Department]"
+  },
+  {
+   "kind": "copy",
+   "col": "Branch",
+   "source": "inferred",
+   "name": "Branch",
+   "match": 1.0,
+   "status": "ok",
+   "description": "Copy of [Branch]"
+  },
+  {
+   "kind": "copy",
+   "col": "Cost_Center",
+   "source": "inferred",
+   "name": "Cost_Center",
+   "match": 1.0,
+   "status": "ok",
+   "description": "Copy of [Cost_Center]"
+  },
+  {
+   "kind": "copy",
+   "col": "Account_Type",
+   "source": "inferred",
+   "name": "Account_Type",
+   "match": 1.0,
+   "status": "ok",
+   "description": "Copy of [Account_Type]"
+  },
+  {
+   "kind": "copy",
+   "col": "Debit_Credit",
+   "source": "inferred",
+   "name": "Debit_Credit",
+   "match": 1.0,
+   "status": "ok",
+   "description": "Copy of [Debit_Credit]"
+  },
+  {
+   "kind": "copy",
+   "col": "Amount_INR",
+   "source": "inferred",
+   "name": "Amount_INR",
+   "match": 1.0,
+   "status": "ok",
+   "description": "Copy of [Amount_INR]"
+  },
+  {
+   "kind": "copy",
+   "col": "Signed_Amount_INR",
+   "source": "inferred",
+   "name": "Signed_Amount_INR",
+   "match": 1.0,
+   "status": "ok",
+   "description": "Copy of [Signed_Amount_INR]"
+  },
+  {
+   "kind": "copy",
+   "col": "Counterparty",
+   "source": "inferred",
+   "name": "Counterparty",
+   "match": 1.0,
+   "status": "ok",
+   "description": "Copy of [Counterparty]"
+  },
+  {
+   "kind": "copy",
+   "col": "Reference_Code",
+   "source": "inferred",
+   "name": "Reference_Code",
+   "match": 1.0,
+   "status": "ok",
+   "description": "Copy of [Reference_Code]"
+  },
+  {
+   "kind": "lookup",
+   "table": "Mapping",
+   "keys": [
+    "Account_Type"
+   ],
+   "table_keys": [
+    "Account_Type"
+   ],
+   "value": "Derived_Category",
+   "default": null,
+   "source": "inferred",
+   "name": "Derived_Category",
+   "match": 1.0,
+   "status": "ok",
+   "description": "Lookup Mapping.Derived_Category where Account_Type = [Account_Type] (exact)"
+  },
+  {
+   "kind": "lookup",
+   "table": "Mapping",
+   "keys": [
+    "Account_Type"
+   ],
+   "table_keys": [
+    "Account_Type"
+   ],
+   "value": "GL_Code",
+   "default": null,
+   "source": "inferred",
+   "name": "GL_Code",
+   "match": 1.0,
+   "status": "ok",
+   "description": "Lookup Mapping.GL_Code where Account_Type = [Account_Type] (exact)"
+  },
+  {
+   "kind": "lookup",
+   "table": "Mapping",
+   "keys": [
+    "Account_Type"
+   ],
+   "table_keys": [
+    "Account_Type"
+   ],
+   "value": "Review_Threshold_INR",
+   "default": null,
+   "source": "inferred",
+   "name": "Review_Threshold_INR",
+   "match": 1.0,
+   "status": "ok",
+   "description": "Lookup Mapping.Review_Threshold_INR where Account_Type = [Account_Type] (exact)"
+  },
+  {
+   "kind": "lookup",
+   "table": "Mapping",
+   "keys": [
+    "Account_Type"
+   ],
+   "table_keys": [
+    "Account_Type"
+   ],
+   "value": "Owner_Team",
+   "default": null,
+   "source": "inferred",
+   "name": "Owner_Team",
+   "match": 1.0,
+   "status": "ok",
+   "description": "Lookup Mapping.Owner_Team where Account_Type = [Account_Type] (exact)"
+  },
+  {
+   "kind": "cond",
+   "tree": {
+    "test": {
+     "col": "Amount_INR",
+     "op": ">",
+     "value_col": "Review_Threshold_INR"
+    },
+    "then": {
+     "leaf": {
+      "const": "REVIEW"
+     }
+    },
+    "else": {
+     "leaf": {
+      "const": "OK"
+     }
+    }
+   },
+   "source": "inferred",
+   "name": "Review_Flag",
+   "match": 1.0,
+   "status": "ok",
+   "description": "IF([Amount_INR] > [Review_Threshold_INR], \"REVIEW\", \"OK\")"
+  },
+  {
+   "kind": "datepart",
+   "col": "Transaction_Date",
+   "part": "ym",
+   "source": "inferred",
+   "name": "Month",
+   "match": 1.0,
+   "status": "ok",
+   "description": "ym of [Transaction_Date]"
+  },
+  {
+   "kind": "copy",
+   "col": "Signed_Amount_INR",
+   "source": "inferred",
+   "name": "Net_Amount_INR",
+   "match": 1.0,
+   "status": "ok",
+   "description": "Copy of [Signed_Amount_INR]"
+  },
+  {
+   "kind": "const",
+   "value": "MAPPED",
+   "source": "inferred",
+   "name": "Mapping_Status",
+   "match": 1.0,
+   "status": "ok",
+   "description": "Constant \"MAPPED\""
+  },
+  {
+   "kind": "lookup",
+   "table": "Mapping",
+   "keys": [
+    "Account_Type"
+   ],
+   "table_keys": [
+    "Account_Type"
+   ],
+   "value": "Output_Sheet",
+   "default": null,
+   "source": "inferred",
+   "name": "Output_Sheet",
+   "match": 1.0,
+   "status": "ok",
+   "only_in": [
+    "All_Enriched_Audit"
+   ],
+   "description": "Lookup Mapping.Output_Sheet where Account_Type = [Account_Type] (exact)"
+  }
+ ]
+}

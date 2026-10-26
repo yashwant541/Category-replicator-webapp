@@ -35,7 +35,11 @@ def _samples():
 
 @app.route("/dev/sample/<name>")
 def _sample(name):
-    return Response((HERE / "samples" / pathlib.Path(name).name).read_bytes(), mimetype="application/octet-stream")
+    for folder in ("sample_data", "samples", "sample_data/bank"):
+        f = HERE / folder / pathlib.Path(name).name
+        if f.exists():
+            return Response(f.read_bytes(), mimetype="application/octet-stream")
+    return Response("not found", 404)
 
 
 @app.route("/")

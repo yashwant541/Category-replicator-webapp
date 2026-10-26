@@ -86,6 +86,8 @@ def read_workbook(file_bytes: bytes, filename: str) -> List[Dict[str, Any]]:
 
 
 def guess_role(filename: str, sheet: str, n_formulas: int, is_first: bool) -> str:
+    if re.search(r"dictionary|readme|read_me|notes?\b|instructions|legend|glossary|about", sheet.lower()):
+        return "ignore"
     s = f"{filename} {sheet}".lower()
     if re.search(r"\b(map|mapping|lookup|rate|rates|ref|reference|master|param|toggle)", s):
         return "mapping"

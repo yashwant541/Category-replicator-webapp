@@ -182,11 +182,17 @@ def _const(v) -> Dict[str, Any]:
 class Learner:
     def __init__(self, X: pd.DataFrame, Y: pd.DataFrame, tables: Dict[str, pd.DataFrame],
                  formulas: Optional[Dict[str, Dict[str, Any]]] = None,
-                 toggles: Optional[List[Dict[str, Any]]] = None, y_known: bool = True):
+                 toggles: Optional[List[Dict[str, Any]]] = None, y_known: bool = True,
+                 variants: Optional[Dict[str, Dict[str, Dict[str, Any]]]] = None,
+                 sheets: Optional[pd.Series] = None,
+                 sheet_columns: Optional[Dict[str, List[str]]] = None):
         self.X = X.reset_index(drop=True)
         self.Y = Y.reset_index(drop=True)
         self.tables = tables
         self.formulas = formulas or {}
+        self.sheet_columns = sheet_columns or {}
+        self.variants = variants or {}            # column -> {output sheet: formula}
+        self.sheets = sheets.reset_index(drop=True) if sheets is not None else None
         self.toggles = toggles or []
         self.y_known = y_known
         self.ctx = Ctx(tables, self.toggles)
@@ -200,13 +206,36 @@ class Learner:
         rules = []
         for c in out_cols:
             y = self.Y[c]
-            rule, m, status = self._learn_one(c, y)
+            pm = self._present(c)
+            if pm is not None and not pm.all():
+                rule, m, status = self._learn_subset(c, pm)
+            else:
+                rule, m, status = self._learn_one(c, y)
             rule["name"] = c
             rule["match"] = round(float(m), 4) if m is not None else None
             rule["status"] = status
             rules.append(rule)
             self.work[c] = y.values  # downstream columns learn from the true values
         return rules
+
+    def _present(self, col: str) -> Optional[np.ndarray]:
+        """Rows whose output sheet actually has this column (None = all rows)."""
+        if not self.sheet_columns or self.sheets is None:
+            return None
+        has = {sh: (col in cs) for sh, cs in self.sheet_columns.items()}
+        return self.sheets.map(lambda sh: has.get(sh, True)).values.astype(bool)
+
+    def _learn_subset(self, col: str, pm: np.ndarray):
+        """Learn a column that exists on only some output sheets from just those sheets' rows."""
+        import copy
+        sub = copy.copy(self)
+        sub.work = self.work[pm].reset_index(drop=True)
+        sub.Y = self.Y[pm].reset_index(drop=True)
+        sub.sheets = self.sheets[pm].reset_index(drop=True)
+        sub.n = len(sub.work)
+        sub.S = _pick_sample(sub.n)
+        sub._tkey_cache = {}
+        return sub._learn_one(col, sub.Y[col])
 
     def _score(self, rule: Dict[str, Any], work: pd.DataFrame, y: pd.Series) -> float:
         try:
@@ -227,6 +256,35 @@ class Learner:
             if m > best[0]:
                 best = (m, rule)
             return m >= PERFECT
+
+        # 0a. formula that differs from one output sheet to the next
+        if name in self.variants and self.sheets is not None:
+            vr = self.variants[name]
+            first = next(iter(vr.values()))
+            rule = {"kind": "formula", "pandas_expr": first["pandas_expr"],
+                    "excel_formula": first.get("excel_formula", ""), "source": "formula",
+                    "by_sheet": {sh: {"pandas_expr": c["pandas_expr"], "excel_formula": c.get("excel_formula", "")}
+                                 for sh, c in vr.items()}}
+            fw = work.copy()
+            for c in self.Y.columns:
+                if c != name and c not in fw.columns:
+                    fw[c] = self.Y[c].values
+            from .rules import _formula_one
+            try:
+                out = pd.Series([np.nan] * len(fw), dtype=object)
+                for sh, c in vr.items():
+                    m = (self.sheets == sh).values
+                    if m.any():
+                        out[m] = _formula_one(c["pandas_expr"], fw, self.ctx).values[m]
+                unknown = bool(y.map(is_blank).all())
+                mm = 1.0 if unknown else float(eq_series(out, y).mean())
+            except Exception as exc:  # noqa: BLE001
+                rule["error"] = str(exc)
+                mm = -1.0
+            rule["_pending_group"] = True
+            if mm >= PERFECT:
+                return rule, (None if unknown else mm), "unchecked" if unknown else "ok"
+            best = (mm, rule)
 
         # 0. formula found in the output workbook
         f = self.formulas.get(name)
@@ -794,6 +852,8 @@ def build_tree(df: pd.DataFrame, y: pd.Series, max_depth: int = 3, max_leaves: i
             feats[c] = ("num", to_num(s).values.astype(float))
         else:
             feats[c] = ("cat", s.map(nk).values)
+    num_cols = [c for c, (k, _) in feats.items() if k == "num"][:12]
+    pairs = [(a, b, op) for a in num_cols for b in num_cols if a != b for op in (">", ">=")]
     leaves = [0]
 
     def leaf(idx):
@@ -831,9 +891,23 @@ def build_tree(df: pd.DataFrame, y: pd.Series, max_depth: int = 3, max_leaves: i
                     if score > best[0] + 1e-9:
                         orig = next(df[c].iloc[j] for j in idx if arr[j] == val)
                         best = (score, {"col": c, "op": "==", "value": _py(orig)})
+        for a, b, op in pairs:
+            va, vb = feats[a][1][idx], feats[b][1][idx]
+            m = (va > vb) if op == ">" else (va >= vb)
+            if m.all() or not m.any():
+                continue
+            score = np.bincount(yy_all(idx)[m], minlength=K).max() + np.bincount(yy_all(idx)[~m], minlength=K).max()
+            if score > best[0] + 1e-9:
+                best = (score, {"col": a, "op": op, "value_col": b})
         return best[1]
 
+    def yy_all(idx):
+        return yi[idx]
+
     def split_mask(test):
+        if test.get("value_col"):
+            xa, xb = feats[test["col"]][1], feats[test["value_col"]][1]
+            return (xa > xb) if test["op"] == ">" else (xa >= xb)
         arr_kind, arr = feats[test["col"]]
         if test["op"] == ">=":
             return arr >= float(test["value"])

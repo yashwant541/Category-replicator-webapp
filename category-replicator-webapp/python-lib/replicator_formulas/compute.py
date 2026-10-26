@@ -265,7 +265,11 @@ def COUNT(*a):
 
 
 def ROUND(x, n=0):
-    return np.round(pd.to_numeric(x, errors="coerce") if isinstance(x, pd.Series) else x, int(n))
+    """Excel ROUND: half away from zero, on the number as Excel sees it (15 significant digits)."""
+    v = pd.to_numeric(x, errors="coerce") if isinstance(x, pd.Series) else x
+    f = 10.0 ** int(n)
+    scaled = np.round(np.abs(v) * f, 6)          # strip binary noise like 127923.49999999999
+    return np.sign(v) * np.floor(scaled + 0.5) / f
 
 
 def ROUNDUP(x, n=0):

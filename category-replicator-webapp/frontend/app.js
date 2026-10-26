@@ -425,7 +425,7 @@
       const p = run.preview[n];
       clear(holder).appendChild(h("div", { class: "scroll" }, [h("table", { class: "t" }, [
         h("thead", {}, [h("tr", {}, p.headers.map(x => h("th", { text: x })))]),
-        h("tbody", {}, p.data.map(r => h("tr", {}, r.map(v => h("td", { text: v == null ? "" : String(v) })))))])]));
+        h("tbody", {}, p.data.map(r => h("tr", {}, r.map(v => h("td", { text: v == null ? "" : String(v).replace(/T00:00:00$/, "") })))))])]));
       holder.appendChild(h("div", { class: "muted small", text: "Showing " + p.data.length + " of " + p.rows + " rows" }));
     }
     names.forEach(n => tabs.appendChild(h("a", { class: "tab", "data-n": n, text: n + " (" + run.preview[n].rows + ")", onclick: () => show(n) })));

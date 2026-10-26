@@ -1,0 +1,77 @@
+{
+ "headers": [
+  "Account_Type",
+  "Output_Sheet",
+  "Derived_Category",
+  "GL_Code",
+  "Review_Threshold_INR",
+  "Owner_Team"
+ ],
+ "records": [
+  {
+   "Account_Type": "Salary",
+   "Output_Sheet": "Payroll_Output",
+   "Derived_Category": "Staff Costs",
+   "GL_Code": "GL-6100",
+   "Review_Threshold_INR": 100000,
+   "Owner_Team": "Payroll"
+  },
+  {
+   "Account_Type": "Vendor Payment",
+   "Output_Sheet": "Vendor_Output",
+   "Derived_Category": "Operating Expenses",
+   "GL_Code": "GL-6200",
+   "Review_Threshold_INR": 250000,
+   "Owner_Team": "Accounts Payable"
+  },
+  {
+   "Account_Type": "Customer Refund",
+   "Output_Sheet": "Customer_Output",
+   "Derived_Category": "Customer Adjustments",
+   "GL_Code": "GL-2300",
+   "Review_Threshold_INR": 100000,
+   "Owner_Team": "Customer Service"
+  },
+  {
+   "Account_Type": "Interest",
+   "Output_Sheet": "Customer_Output",
+   "Derived_Category": "Interest Income",
+   "GL_Code": "GL-4100",
+   "Review_Threshold_INR": 150000,
+   "Owner_Team": "Retail Finance"
+  },
+  {
+   "Account_Type": "Fee Income",
+   "Output_Sheet": "Customer_Output",
+   "Derived_Category": "Fee Income",
+   "GL_Code": "GL-4200",
+   "Review_Threshold_INR": 200000,
+   "Owner_Team": "Retail Finance"
+  },
+  {
+   "Account_Type": "Travel Expense",
+   "Output_Sheet": "Vendor_Output",
+   "Derived_Category": "Travel & Entertainment",
+   "GL_Code": "GL-6250",
+   "Review_Threshold_INR": 50000,
+   "Owner_Team": "Accounts Payable"
+  },
+  {
+   "Account_Type": "Loan Disbursement",
+   "Output_Sheet": "Customer_Output",
+   "Derived_Category": "Loans & Advances",
+   "GL_Code": "GL-1400",
+   "Review_Threshold_INR": 300000,
+   "Owner_Team": "Lending"
+  },
+  {
+   "Account_Type": "Cash Deposit",
+   "Output_Sheet": "Customer_Output",
+   "Derived_Category": "Cash & Deposits",
+   "GL_Code": "GL-2100",
+   "Review_Threshold_INR": 200000,
+   "Owner_Team": "Branch Operations"
+  }
+ ],
+ "header_row": 0
+}

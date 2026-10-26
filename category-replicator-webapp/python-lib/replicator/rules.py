@@ -88,6 +88,8 @@ def to_num(s: pd.Series) -> pd.Series:
 
 
 def numeric_share(s: pd.Series) -> float:
+    if pd.api.types.is_datetime64_any_dtype(s):   # dates are not numbers (pandas would turn them into ns ints)
+        return 0.0
     nb = ~s.map(is_blank)
     if not nb.any():
         return 0.0
@@ -247,7 +249,7 @@ def _node(node: Dict[str, Any], work: pd.DataFrame, ctx: Ctx) -> pd.Series:
 def _round_half_up(s: pd.Series, n: int) -> pd.Series:
     f = 10.0 ** n
     v = s * f
-    return np.sign(v) * np.floor(np.abs(v) + 0.5 + 1e-9) / f  # Excel ROUND (half away from zero)
+    return np.sign(v) * np.floor(np.round(np.abs(v), 6) + 0.5) / f  # Excel ROUND (half away from zero)
 
 
 # ----------------------------------------------------------------------- conditions
@@ -289,23 +291,52 @@ def _leaf(node: Dict[str, Any], work: pd.DataFrame) -> pd.Series:
     return get_col(work, node["col"]).astype(object)
 
 
+def _pair_mask(a: pd.Series, op: str, b: pd.Series) -> np.ndarray:
+    x, y = to_num(a).values, to_num(b).values
+    with np.errstate(invalid="ignore"):
+        return {">": x > y, ">=": x >= y, "<": x < y, "<=": x <= y,
+                "==": np.isclose(x, y, rtol=1e-9, atol=1e-9), "!=": ~np.isclose(x, y, rtol=1e-9, atol=1e-9)}[op]
+
+
 def _tree(tree: Dict[str, Any], work: pd.DataFrame) -> pd.Series:
     if "leaf" in tree:
         return _leaf(tree["leaf"], work)
     t = tree["test"]
-    m = cmp_mask(get_col(work, t["col"]), t["op"], t.get("value")).values
+    if t.get("value_col"):      # compare two columns, e.g. Amount > Threshold
+        m = _pair_mask(get_col(work, t["col"]), t["op"], get_col(work, t["value_col"]))
+    else:
+        m = cmp_mask(get_col(work, t["col"]), t["op"], t.get("value")).values
     a, b = _tree(tree["then"], work), _tree(tree["else"], work)
     return pd.Series(np.where(m, a.values, b.values), index=work.index, dtype=object)
 
 
 # -------------------------------------------------------------------------- formula
 def formula_series(rule: Dict[str, Any], work: pd.DataFrame, ctx: Ctx) -> pd.Series:
+    if rule.get("by_sheet") and rule.get("group"):
+        # the formula differs per split sheet: evaluate every variant, keep each row's own one
+        g = rule["group"]
+        grp = get_col(work, g["col"]).map(nk).map(g["map"])
+        names = list(rule["by_sheet"])
+        out = pd.Series(np.nan, index=work.index, dtype=object)
+        first = _formula_one(rule["by_sheet"][names[0]]["pandas_expr"], work, ctx)
+        out[:] = first.values
+        for sh in names[1:]:
+            m = (grp == sh).values
+            if m.any():
+                v = _formula_one(rule["by_sheet"][sh]["pandas_expr"], work, ctx)
+                out[m] = v.values[m]
+        m0 = (grp == names[0]).values
+        return out
+    return _formula_one(rule["pandas_expr"], work, ctx)
+
+
+def _formula_one(expr: str, work: pd.DataFrame, ctx: Ctx) -> pd.Series:
     from replicator_formulas import compute  # lazy: keeps rules importable on its own
     lk = compute.Lookups({
         n: {"headers": list(df.columns), "records": df.to_dict("records"), "header_row": 0}
         for n, df in ctx.tables.items()
     })
-    recipe = {"computed_columns": [{"name": "__out__", "pandas_expr": rule["pandas_expr"]}],
+    recipe = {"computed_columns": [{"name": "__out__", "pandas_expr": expr}],
               "toggles": ctx.toggles}
     res = compute.evaluate(work, recipe, lk)
     errs = res.attrs.get("compute_errors")
@@ -416,6 +447,8 @@ def _tree_cols(t: Dict[str, Any], out: List[str]) -> None:
             out.append(t["leaf"]["col"])
         return
     out.append(t["test"]["col"])
+    if t["test"].get("value_col"):
+        out.append(t["test"]["value_col"])
     _tree_cols(t["then"], out)
     _tree_cols(t["else"], out)
 
@@ -434,7 +467,11 @@ def rule_columns(rule: Dict[str, Any]) -> List[str]:
     elif k == "cond":
         _tree_cols(rule["tree"], out)
     elif k == "formula":
-        out.extend(re.findall(r"df\[\s*['\"]([^'\"]+)['\"]\s*\]", rule.get("pandas_expr", "")))
+        exprs = [rule.get("pandas_expr", "")] + [v.get("pandas_expr", "") for v in (rule.get("by_sheet") or {}).values()]
+        for e in exprs:
+            out.extend(re.findall(r"df\[\s*['\"]([^'\"]+)['\"]\s*\]", e))
+        if rule.get("group"):
+            out.append(rule["group"]["col"])
     return list(dict.fromkeys(out))
 
 
@@ -451,7 +488,8 @@ def rule_tables(rule: Dict[str, Any]) -> List[str]:
         out.append(rule["table"])
     walk(rule.get("expr", {}))
     if rule["kind"] == "formula":
-        out.extend(re.findall(r"VLOOKUP\([^,]+,\s*['\"]([^'\"]+)['\"]", rule.get("pandas_expr", "")))
+        for e in [rule.get("pandas_expr", "")] + [v.get("pandas_expr", "") for v in (rule.get("by_sheet") or {}).values()]:
+            out.extend(re.findall(r"VLOOKUP\([^,]+,\s*['\"]([^'\"]+)['\"]", e))
     return list(dict.fromkeys(out))
 
 
@@ -477,7 +515,8 @@ def _desc_tree(t: Dict[str, Any]) -> str:
     if "leaf" in t:
         return _desc_node(t["leaf"])
     x = t["test"]
-    return f"IF([{x['col']}] {x['op']} {_fmt_const(x.get('value'))}, {_desc_tree(t['then'])}, {_desc_tree(t['else'])})"
+    rhs = f"[{x['value_col']}]" if x.get("value_col") else _fmt_const(x.get("value"))
+    return f"IF([{x['col']}] {x['op']} {rhs}, {_desc_tree(t['then'])}, {_desc_tree(t['else'])})"
 
 
 def describe(rule: Dict[str, Any]) -> str:
@@ -512,6 +551,9 @@ def describe(rule: Dict[str, Any]) -> str:
     if k == "learned_map":
         return f"Learned mapping from {', '.join('[' + c + ']' for c in rule['keys'])} ({len(rule['pairs'])} entries)"
     if k == "formula":
+        if rule.get("by_sheet"):
+            return "Formula differs per sheet: " + " | ".join(
+                "%s: %s" % (n, v.get("excel_formula") or v.get("pandas_expr")) for n, v in rule["by_sheet"].items())
         return rule.get("excel_formula") or rule.get("pandas_expr", "")
     return k
 
@@ -565,6 +607,8 @@ def excel_formula(rule: Dict[str, Any], ref: Callable[[str], str],
         c = ref(x["col"])
         v = x.get("value")
         op = {"==": "=", "!=": "<>"}.get(x["op"], x["op"])
+        if x.get("value_col"):
+            return f"IF({c}{op}{ref(x['value_col'])},{tree(t['then'])},{tree(t['else'])})"
         if op in ("blank", "is empty"):
             cond = f'{c}=""'
         elif op in ("not blank", "not empty"):
@@ -609,7 +653,7 @@ def excel_formula(rule: Dict[str, Any], ref: Callable[[str], str],
         if k == "cond":
             return "=" + tree(rule["tree"])
         if k == "formula":
-            return rule.get("excel_formula") or None
+            return None if rule.get("by_sheet") else (rule.get("excel_formula") or None)
     except (ValueError, KeyError):
         return None
     return None

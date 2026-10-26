@@ -51,3 +51,10 @@ Tests: `cd tests && python -m pytest -q`.
   formulas are used as-is (status *From formula*, no match % since there are no values to compare).
 - Rows are matched between input and output by order, or by an identifying column carried into the output.
 - Multi-key lookups and approximate (band) lookups are values-only in live-formula mode.
+
+## Dummy data for trying it out
+`python dev/make_dummy_data.py` writes `dev/sample_data/` (already generated): loan exposures split into 4 input sheets
+(Retail_EMEA, Retail_APAC, Corporate_Global, SME_Global), a 4-sheet mapping workbook (Ratings, Products, Countries, FX),
+and an expected output where **each sheet has its own derived columns** (live formulas with cached values, plus the
+mapping sheets). Upload files 1 → input, 2 → mapping, 3 → expected output; then run the system on 4 and compare to 5.
+Output sheets with different columns are supported: each keeps its own derived columns and formulas.

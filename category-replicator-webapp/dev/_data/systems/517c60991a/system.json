@@ -1,0 +1,272 @@
+{
+ "engine": "2026.10a",
+ "id": "517c60991a",
+ "name": "Test",
+ "description": "dada",
+ "created": "2026-10-26T04:49:34Z",
+ "input": {
+  "columns": [
+   "Transaction_ID",
+   "Transaction_Date",
+   "Employee_ID",
+   "Employee_Name",
+   "Department",
+   "Branch",
+   "Cost_Center",
+   "Account_Type",
+   "Debit_Credit",
+   "Amount_INR",
+   "Signed_Amount_INR",
+   "Counterparty",
+   "Reference_Code"
+  ],
+  "sources": [
+   {
+    "file": "bank_financials_source_data.xlsx",
+    "sheet": "Raw_Data",
+    "rows": 60
+   }
+  ],
+  "required": [
+   "Transaction_ID",
+   "Transaction_Date",
+   "Employee_ID",
+   "Employee_Name",
+   "Department",
+   "Branch",
+   "Cost_Center",
+   "Account_Type",
+   "Debit_Credit",
+   "Amount_INR",
+   "Signed_Amount_INR",
+   "Counterparty",
+   "Reference_Code"
+  ]
+ },
+ "table_sources": {
+  "Mapping": "bank_financials_mapping.xlsx / Mapping"
+ },
+ "output": {
+  "columns": [
+   "Transaction_ID",
+   "Transaction_Date",
+   "Employee_ID",
+   "Employee_Name",
+   "Department",
+   "Branch",
+   "Cost_Center",
+   "Account_Type",
+   "Debit_Credit",
+   "Amount_INR",
+   "Signed_Amount_INR",
+   "Counterparty",
+   "Reference_Code",
+   "Derived_Category",
+   "GL_Code",
+   "Review_Threshold_INR",
+   "Owner_Team",
+   "Review_Flag",
+   "Month",
+   "Net_Amount_INR",
+   "Mapping_Status",
+   "Output_Sheet"
+  ],
+  "sheet_name": "Payroll_Output",
+  "sheet_columns": {
+   "Payroll_Output": [
+    "Transaction_ID",
+    "Transaction_Date",
+    "Employee_ID",
+    "Employee_Name",
+    "Department",
+    "Branch",
+    "Cost_Center",
+    "Account_Type",
+    "Debit_Credit",
+    "Amount_INR",
+    "Signed_Amount_INR",
+    "Counterparty",
+    "Reference_Code",
+    "Derived_Category",
+    "GL_Code",
+    "Review_Threshold_INR",
+    "Owner_Team",
+    "Review_Flag",
+    "Month",
+    "Net_Amount_INR",
+    "Mapping_Status"
+   ],
+   "Vendor_Output": [
+    "Transaction_ID",
+    "Transaction_Date",
+    "Employee_ID",
+    "Employee_Name",
+    "Department",
+    "Branch",
+    "Cost_Center",
+    "Account_Type",
+    "Debit_Credit",
+    "Amount_INR",
+    "Signed_Amount_INR",
+    "Counterparty",
+    "Reference_Code",
+    "Derived_Category",
+    "GL_Code",
+    "Review_Threshold_INR",
+    "Owner_Team",
+    "Review_Flag",
+    "Month",
+    "Net_Amount_INR",
+    "Mapping_Status"
+   ],
+   "Customer_Output": [
+    "Transaction_ID",
+    "Transaction_Date",
+    "Employee_ID",
+    "Employee_Name",
+    "Department",
+    "Branch",
+    "Cost_Center",
+    "Account_Type",
+    "Debit_Credit",
+    "Amount_INR",
+    "Signed_Amount_INR",
+    "Counterparty",
+    "Reference_Code",
+    "Derived_Category",
+    "GL_Code",
+    "Review_Threshold_INR",
+    "Owner_Team",
+    "Review_Flag",
+    "Month",
+    "Net_Amount_INR",
+    "Mapping_Status"
+   ],
+   "All_Enriched_Audit": [
+    "Transaction_ID",
+    "Transaction_Date",
+    "Employee_ID",
+    "Employee_Name",
+    "Department",
+    "Branch",
+    "Cost_Center",
+    "Account_Type",
+    "Debit_Credit",
+    "Amount_INR",
+    "Signed_Amount_INR",
+    "Counterparty",
+    "Reference_Code",
+    "Output_Sheet",
+    "Derived_Category",
+    "GL_Code",
+    "Review_Threshold_INR",
+    "Owner_Team",
+    "Review_Flag",
+    "Month",
+    "Net_Amount_INR",
+    "Mapping_Status"
+   ]
+  }
+ },
+ "toggles": [],
+ "filters": {
+  "pre": [],
+  "split": {
+   "enabled": true,
+   "mode": "custom",
+   "column": "",
+   "map": {},
+   "new_values": "create",
+   "sheets": [
+    {
+     "name": "Payroll_Output",
+     "match": "all",
+     "conditions": [
+      {
+       "col": "Output_Sheet",
+       "op": "==",
+       "value": "Payroll_Output"
+      }
+     ]
+    },
+    {
+     "name": "Vendor_Output",
+     "match": "all",
+     "conditions": [
+      {
+       "col": "Output_Sheet",
+       "op": "==",
+       "value": "Vendor_Output"
+      }
+     ]
+    },
+    {
+     "name": "Customer_Output",
+     "match": "all",
+     "conditions": [
+      {
+       "col": "Output_Sheet",
+       "op": "==",
+       "value": "Customer_Output"
+      }
+     ]
+    },
+    {
+     "name": "All_Enriched_Audit",
+     "match": "all",
+     "conditions": []
+    }
+   ],
+   "rest_sheet": ""
+  }
+ },
+ "training": {
+  "align": {
+   "method": "per sheet",
+   "input_rows": 60,
+   "output_rows": 120
+  },
+  "output_rows": 120,
+  "sheets": [
+   "Payroll_Output",
+   "Vendor_Output",
+   "Customer_Output",
+   "All_Enriched_Audit"
+  ],
+  "replay_match": 1.0,
+  "replay_cols": {
+   "Transaction_ID": 1.0,
+   "Transaction_Date": 1.0,
+   "Employee_ID": 1.0,
+   "Employee_Name": 1.0,
+   "Department": 1.0,
+   "Branch": 1.0,
+   "Cost_Center": 1.0,
+   "Account_Type": 1.0,
+   "Debit_Credit": 1.0,
+   "Amount_INR": 1.0,
+   "Signed_Amount_INR": 1.0,
+   "Counterparty": 1.0,
+   "Reference_Code": 1.0,
+   "Derived_Category": 1.0,
+   "GL_Code": 1.0,
+   "Review_Threshold_INR": 1.0,
+   "Owner_Team": 1.0,
+   "Review_Flag": 1.0,
+   "Month": 1.0,
+   "Net_Amount_INR": 1.0,
+   "Mapping_Status": 1.0,
+   "Output_Sheet": 1.0
+  }
+ },
+ "warnings": [
+  "Output sheets have different columns (Output_Sheet): each sheet keeps its own derived columns."
+ ],
+ "updated": "2026-10-26T04:49:34Z",
+ "table_files": {
+  "Mapping": "Mapping"
+ },
+ "table_hashes": {
+  "Mapping": "5eaa6a76947b6425de4c304ded493528"
+ }
+}

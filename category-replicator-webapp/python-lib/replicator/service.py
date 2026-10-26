@@ -55,6 +55,8 @@ def add_draft_files(store, did: str, files: List[Tuple[str, bytes]], hint: str =
         ent = {"fid": fid, "name": name, "path": f"drafts/{did}/files/{fid}_{_slug(name)}", "sheets": []}
         for i, s in enumerate(sheets):
             role = hint if hint in ROLES and hint != "ignore" else guess_role(name, s["sheet"], s["n_formulas"], i == 0)
+            if guess_role(name, s["sheet"], s["n_formulas"], i == 0) == "ignore" and hint in ("input", "mapping"):
+                role = "ignore"     # data dictionaries / notes sheets are not data
             if hint == "output":
                 role = "output"
                 # an output workbook often carries the mapping sheets its formulas use
@@ -208,20 +210,24 @@ def _training_frames(store, s: Dict[str, Any]) -> Tuple[pd.DataFrame, pd.DataFra
     ins = [e for e in es if e["role"] == "input"]
     outs = [e for e in es if e["role"] == "output"]
     cols = s["input"]["columns"]
-    X = pd.concat([canonical_columns(e["df"], cols) for e in ins if
-                   {nk(c) for c in e["df"].columns} == {nk(c) for c in cols}] or [ins[0]["df"]],
-                  ignore_index=True)
+    same = [e for e in ins if {nk(c) for c in e["df"].columns} == {nk(c) for c in cols if c != engine.SRC}]
+    frames = []
+    for e in same or [ins[0]]:
+        f = canonical_columns(e["df"], cols).copy()
+        if engine.SRC in cols:
+            f[engine.SRC] = e["sheet"]
+        frames.append(f)
+    X = pd.concat(frames, ignore_index=True)
     ocols = s["output"]["columns"]
-    Y = pd.concat([canonical_columns(e["df"], ocols) for e in outs if
-                   {nk(c) for c in e["df"].columns} == {nk(c) for c in ocols}] or [outs[0]["df"]],
-                  ignore_index=True)
-    return X, Y
+    Y_sheets = {e["sheet"]: canonical_columns(e["df"], ocols) for e in outs}
+    Y = pd.concat(list(Y_sheets.values()), ignore_index=True)
+    return X, Y, Y_sheets
 
 
 def replay(store, sid: str, persist: bool = True) -> Dict[str, Any]:
     s = get_system(store, sid)
-    X, Y = _training_frames(store, s)
-    res = engine.replay_training(s, X, Y)
+    X, Y, Y_sheets = _training_frames(store, s)
+    res = engine.replay_training(s, X, Y, Y_sheets)
     if persist:
         s.setdefault("training", {})["replay_match"] = res.get("match")
         s["training"]["replay_cols"] = {c["column"]: c["match"] for c in res.get("columns", [])}
@@ -300,8 +306,8 @@ def update_system(store, sid: str, patch: Dict[str, Any]) -> Dict[str, Any]:
 def _read_inputs(system: Dict[str, Any], files: List[Tuple[str, bytes]]
                  ) -> Tuple[pd.DataFrame, List[str], List[Dict[str, Any]]]:
     cols = system["input"]["columns"]
-    want = {nk(c) for c in cols}
-    req = {nk(c) for c in system["input"].get("required", [])} or want
+    want = {nk(c) for c in cols if c != engine.SRC}
+    req = {nk(c) for c in system["input"].get("required", []) if c != engine.SRC} or want
     frames, used, notes = [], [], []
     for name, data in files:
         sheets = read_workbook(data, name)
@@ -316,8 +322,13 @@ def _read_inputs(system: Dict[str, Any], files: List[Tuple[str, bytes]]
             miss = sorted(req - {nk(c) for c in best[1]["df"].columns}) if best else []
             raise ValueError(f"{name}: no sheet has the expected input columns "
                              f"(missing e.g. {', '.join(miss[:6])}).")
-        for s in good[:1]:
-            frames.append(canonical_columns(s["df"], cols))
+        multi = engine.SRC in cols
+        for s in (good if multi else good[:1]):
+            f = canonical_columns(s["df"], cols)
+            if multi:   # the input's own sheets are the split; keep each row's sheet name
+                f = f.copy()
+                f[engine.SRC] = s["sheet"]
+            frames.append(f)
             used.append({"file": name, "sheet": s["sheet"], "rows": int(len(s["df"]))})
     return pd.concat(frames, ignore_index=True), notes, used
 
@@ -345,10 +356,13 @@ def run_system(store, sid: str, input_files: List[Tuple[str, bytes]],
     if expected_file:
         ex = read_workbook(*(expected_file[1], expected_file[0]))
         ocols = s["output"]["columns"]
-        frames = [canonical_columns(x["df"], ocols) for x in ex
-                  if len({nk(c) for c in x["df"].columns} & {nk(c) for c in ocols}) >= max(1, len(ocols) // 2)]
-        if frames:
-            cmp_ = engine.compare_frames(res["out"], pd.concat(frames, ignore_index=True))
+        ysh = {x["sheet"]: canonical_columns(x["df"], ocols) for x in ex
+               if len({nk(c) for c in x["df"].columns} & {nk(c) for c in ocols}) >= max(1, len(ocols) // 2)}
+        if ysh:
+            if len(ysh) == 1 and len(res["sheets"]) == 1:
+                cmp_ = engine.compare_frames(next(iter(res["sheets"].values())), next(iter(ysh.values())))
+            else:
+                cmp_ = engine.compare_sheets(res["sheets"], ysh)
             summary.append(("Match vs expected output", f"{cmp_.get('match', 0) * 100:.2f}%" if cmp_.get("aligned") else cmp_.get("note")))
     tables = engine.tables_to_frames(s, override)
     data = engine.write_workbook(s, res["sheets"], res["work"], summary, live_formulas, tables)
@@ -392,7 +406,7 @@ def input_template(system: Dict[str, Any]) -> bytes:
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "Input"
-    ws.append(system["input"]["columns"])
+    ws.append([c for c in system["input"]["columns"] if c != engine.SRC])
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
