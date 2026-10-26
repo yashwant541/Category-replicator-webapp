@@ -49,7 +49,7 @@
   const main = () => $("#main");
   const KIND = { copy: "Copy", const: "Constant", text: "Text", datepart: "Date part", arith: "Maths", concat: "Join text",
     lookup: "Mapping lookup", cond: "IF / bands", learned_map: "Learned map", formula: "Excel formula" };
-  const STATUS = { ok: ["ok", "OK"], approx: ["warn", "Approximate"], unresolved: ["bad", "Needs a rule"], manual: ["manual", "Manual"], unchecked: ["acc", "From formula"] };
+  const STATUS = { ok: ["ok", "OK"], approx: ["warn", "Approximate"], unresolved: ["bad", "Needs a rule"], manual: ["manual", "Manual"], unchecked: ["acc", "From formula"], excel: ["acc", "Excel calculates"] };
   const OPS = ["==", "!=", ">", ">=", "<", "<=", "in", "not in", "contains", "startswith", "endswith", "blank", "not blank"];
 
   function dl(url) { const a = document.createElement("a"); a.href = API + url; a.click(); }
@@ -295,8 +295,32 @@
   }
 
   /* ---------------------------------------------------------------- rules tab */
+  function layoutCard() {
+    const s = SYS, sc = s.output.sheet_columns || {}, rules = {};
+    s.rules.forEach(r => { rules[r.name] = r; });
+    const isInput = c => { const r = rules[c]; return r && r.kind === "copy" && r.col === c; };
+    const sheets = Object.keys(sc);
+    const split = s.filters.split;
+    return h("div", { class: "card" }, [h("h2", { text: "Output sheets" }),
+      h("div", { class: "muted small", text: "Each sheet is laid out exactly like your sample: the same columns in the same order, starting in the same cell. The sample's formulas are stored as written and placed in the derived columns (only the row number moves, like filling down). The mapping and toggle sheets the formulas depend on are added to the workbook." }),
+      ...sheets.map(sh => {
+        const cols = sc[sh], inp = cols.filter(isInput), der = cols.filter(c => !isInput(c));
+        const cond = split.enabled ? ((split.sheets || []).find(x => x.name === sh) || {}).conditions : null;
+        return h("div", { style: "margin-top:12px" }, [
+          h("div", { class: "row" }, [h("b", { text: sh }), h("span", { class: "pill", text: inp.length + " input + " + der.length + " derived" }),
+            cond && cond.length ? h("span", { class: "muted small", text: "rows where " + cond.map(c => c.col + " " + c.op + " " + (Array.isArray(c.value) ? c.value.join("|") : c.value)).join(" and ") }) : null]),
+          h("div", { class: "chips", style: "margin:6px 0 0" }, [
+            ...inp.map(c => h("span", { class: "chip", text: c })),
+            ...der.map(c => h("span", { class: "chip", style: "background:var(--ok-soft);color:var(--ok);font-weight:600", title: (rules[c] || {}).description || "", text: c }))])]);
+      }),
+      h("div", { class: "row small", style: "margin-top:12px" }, [h("span", { class: "muted", text: "Also in the workbook:" }),
+        ...Object.keys(s.tables).map(t => h("span", { class: "pill warn", text: t + ((s.toggles || []).some(g => g.sheet === t) ? " (toggle)" : " (mapping)") })),
+        h("span", { class: "pill", text: "Run summary" })])]);
+  }
+
   function tabRules(body) {
     const s = SYS;
+    body.appendChild(layoutCard());
     body.appendChild(h("div", { class: "card" }, [
       h("div", { class: "row" }, [h("h2", { text: "How each output column is built", style: "margin:0" }), h("span", { class: "spacer" }),
         h("button", { class: "btn small", text: "Check against training output", onclick: runReplay })]),

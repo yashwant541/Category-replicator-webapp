@@ -312,6 +312,8 @@ def _tree(tree: Dict[str, Any], work: pd.DataFrame) -> pd.Series:
 
 # -------------------------------------------------------------------------- formula
 def formula_series(rule: Dict[str, Any], work: pd.DataFrame, ctx: Ctx) -> pd.Series:
+    if rule.get("excel_only"):
+        return pd.Series(np.nan, index=work.index, dtype=object)
     if rule.get("by_sheet") and rule.get("group"):
         # the formula differs per split sheet: evaluate every variant, keep each row's own one
         g = rule["group"]

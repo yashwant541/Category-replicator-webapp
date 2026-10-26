@@ -362,6 +362,11 @@ def run_system(store, sid: str, input_files: List[Tuple[str, bytes]],
                     override[tname] = sh["df"]
     res = engine.apply_system(s, df, override, toggle_values)
     notes = list(res["notes"])
+    excel_cols = [r["name"] for r in s["rules"] if r.get("excel_only")]
+    if excel_cols:
+        notes.append("Calculated by Excel itself (formula kept exactly as in your sample): " + ", ".join(excel_cols) +
+                     (". Values appear when the workbook is opened in Excel." if live_formulas else
+                      ". These columns stay EMPTY in a values-only output - write the formulas to get them."))
     if override:
         notes.append("Mapping tables replaced for this run: " + ", ".join(override))
     tg = {t["name"]: t.get("value") for t in res["toggles"]}

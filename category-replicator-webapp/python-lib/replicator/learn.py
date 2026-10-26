@@ -191,6 +191,7 @@ class Learner:
         self.tables = tables
         self.formulas = formulas or {}
         self.sheet_columns = sheet_columns or {}
+        self.input_cols = {nk(c): c for c in X.columns}
         self.variants = variants or {}            # column -> {output sheet: formula}
         self.sheets = sheets.reset_index(drop=True) if sheets is not None else None
         self.toggles = toggles or []
@@ -257,19 +258,25 @@ class Learner:
                 best = (m, rule)
             return m >= PERFECT
 
+        def _unsupported(expr: str) -> bool:     # the translator marks what it cannot calculate
+            return "TODO translate" in expr or "MANUAL(" in expr
+
         # 0a. formula that differs from one output sheet to the next
         if name in self.variants and self.sheets is not None:
             vr = self.variants[name]
             first = next(iter(vr.values()))
             rule = {"kind": "formula", "pandas_expr": first["pandas_expr"],
                     "excel_formula": first.get("excel_formula", ""), "source": "formula",
-                    "by_sheet": {sh: {"pandas_expr": c["pandas_expr"], "excel_formula": c.get("excel_formula", "")}
+                    "raw_formula": first.get("sample_excel_formula"), "sample_row": first.get("sample_row"),
+                    "by_sheet": {sh: {"pandas_expr": c["pandas_expr"], "excel_formula": c.get("excel_formula", ""),
+                                      "raw_formula": c.get("sample_excel_formula"), "sample_row": c.get("sample_row")}
                                  for sh, c in vr.items()}}
             fw = work.copy()
             for c in self.Y.columns:
                 if c != name and c not in fw.columns:
                     fw[c] = self.Y[c].values
             from .rules import _formula_one
+            unknown = bool(y.map(is_blank).all())
             try:
                 out = pd.Series([np.nan] * len(fw), dtype=object)
                 for sh, c in vr.items():
@@ -282,9 +289,16 @@ class Learner:
                 rule["error"] = str(exc)
                 mm = -1.0
             rule["_pending_group"] = True
+            if any(_unsupported(c["pandas_expr"]) for c in vr.values()):
+                rule["excel_only"] = True
+                return rule, None, "excel"
             if mm >= PERFECT:
                 return rule, (None if unknown else mm), "unchecked" if unknown else "ok"
-            best = (mm, rule)
+            # the sample's own formulas are the truth: keep them even if we cannot reproduce the numbers
+            if mm < 0:
+                rule["excel_only"] = True
+                return rule, None, "excel"
+            return rule, mm, "approx"
 
         # 0. formula found in the output workbook
         f = self.formulas.get(name)
@@ -295,8 +309,12 @@ class Learner:
                     fw[c] = self.Y[c].values
             rule = {"kind": "formula", "pandas_expr": f["pandas_expr"],
                     "excel_formula": f.get("excel_formula", ""), "source": "formula",
+                    "raw_formula": f.get("sample_excel_formula"), "sample_row": f.get("sample_row"),
                     "notes": f.get("notes", [])}
             unknown = (not self.y_known) or bool(y.map(is_blank).all())
+            if _unsupported(f["pandas_expr"]):
+                rule["excel_only"] = True
+                return rule, None, "excel"
             try:
                 from .rules import formula_series
                 p = formula_series(rule, fw, self.ctx)
@@ -306,10 +324,19 @@ class Learner:
                 m = -1.0
             if m >= PERFECT:
                 return rule, (None if unknown else m), "unchecked" if unknown else "ok"
-            if m > best[0]:
-                best = (m, rule)
+            # the sample's own formula is the truth: keep it (never swap it for a guess learned from the values)
+            if m < 0:
+                rule["excel_only"] = True          # e.g. SUMIFS / INDEX-MATCH: Excel calculates it when opened
+                return rule, None, "excel"
+            return rule, m, "approx"
         if not self.y_known:
             return {"kind": "const", "value": None, "source": "unresolved"}, None, "unresolved"
+
+        # pass-through: same name as an input column and same values -> plain copy (even if the sample happens
+        # to hold a single value, e.g. every row Region = EMEA - new data must still carry its own Region)
+        ic = self.input_cols.get(nk(name))
+        if ic is not None and ic in work.columns and eq_series(work[ic], y).mean() >= PERFECT:
+            return {"kind": "copy", "col": ic, "source": "input"}, 1.0, "ok"
 
         yb = y.map(is_blank)
         if yb.all():

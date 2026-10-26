@@ -206,6 +206,18 @@ def generalize_formula(
         return key
 
     protected = _SHEET_QUALIFIED_RE.sub(stash, formula)
+
+    # Same-sheet ranges (SUMIFS($C$2:$C$40, ...)) are not "fixed parameter cells": keep them verbatim, except
+    # a same-row range like A5:C5 which is row-relative.
+    def range_stash(m: re.Match) -> str:
+        a, b = m.group(1), m.group(2)
+        ma, mb = _CELL_RE.fullmatch(a), _CELL_RE.fullmatch(b)
+        if ma and mb and ma.group(3) != "$" and mb.group(3) != "$" and int(ma.group(4)) == row == int(mb.group(4)):
+            return "%s%s{r}:%s%s{r}" % (ma.group(1), ma.group(2), mb.group(1), mb.group(2))
+        key = f"\x00{len(placeholders)}\x00"
+        placeholders[key] = m.group(0)
+        return key
+    protected = re.sub(r"(\$?[A-Za-z]{1,3}\$?\d+):(\$?[A-Za-z]{1,3}\$?\d+)", range_stash, protected)
     generalized = _CELL_RE.sub(repl, protected)
     for key, val in placeholders.items():
         generalized = generalized.replace(key, val)
@@ -307,7 +319,7 @@ def analyze_sample(file_bytes: bytes, data_sheet: Optional[str] = None) -> Dict[
         n for n in sheet_names if n != ds_name and is_toggle_sheet(n)
     }
 
-    def _register_toggle(name: str, value: str, sheet=None, cell=None, tag=None) -> str:
+    def _register_toggle(name: str, value: str, sheet=None, cell=None, tag=None, raw=None, anchored=None) -> str:
         tag = tag or (f"{sheet}!{cell}" if sheet else cell or name)
         base, cand = name, name
         i = 2
@@ -320,6 +332,9 @@ def analyze_sample(file_bytes: bytes, data_sheet: Optional[str] = None) -> Dict[
             entry["sheet"] = sheet
         if cell:
             entry["cell"] = cell
+        if anchored is not None:
+            entry["anchored"] = anchored
+            entry["raw"] = raw if isinstance(raw, (str, int, float, bool)) or raw is None else str(raw)
         toggle_defs.setdefault(cand, entry)
         return cand
 
@@ -360,7 +375,8 @@ def analyze_sample(file_bytes: bytes, data_sheet: Optional[str] = None) -> Dict[
                 raw_value = None
             label = _guess_cell_label(ws_v, row_num, col_idx) or f"Cell {addr}"
             sheet_cell_to_toggle[key] = _register_toggle(
-                label, _guess_toggle_value(raw_value), cell=addr, tag=addr
+                label, _guess_toggle_value(raw_value), cell=addr, tag=addr,
+                raw=raw_value, anchored=("$" in raw_text),
             )
         return "{tok:%s}" % sheet_cell_to_toggle[key]
 
@@ -403,6 +419,7 @@ def analyze_sample(file_bytes: bytes, data_sheet: Optional[str] = None) -> Dict[
                 "position": j,
                 "excel_formula": generalized,
                 "sample_excel_formula": formula_cell,
+                "sample_row": formula_excel_row,
                 "pandas_expr": pandas_expr,
                 "refs": refs,
                 "notes": xl_notes,
