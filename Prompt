@@ -1,0 +1,69 @@
+You are a senior Python / Dataiku engineer. I am attaching three files for ONE risk category:
+  1. INPUT   – raw data workbook (possibly several sheets, header row not on row 1)
+  2. MAPPING – lookup/mapping workbook (may also be embedded as sheets inside INPUT)
+  3. OUTPUT  – a sample, finished output workbook (one or more sheets, with Excel formulas)
+
+Write ONE complete, runnable Dataiku Python recipe that reproduces the OUTPUT from the INPUT + MAPPING,
+and also writes an independent Excel formula-template workbook. Follow the structure of my reference
+script (the Retail STD RWA recipe, pasted below / attached) exactly, and change ONLY what the new data requires.
+
+## Step 1 – Analyse before coding (show me a short table of findings first)
+- Input: for each sheet, header row, key columns used to detect it, columns that are raw source data vs. derived.
+- Output: for each output sheet, its columns, which are copied from input, which are constants, which are
+  derived, and the EXACT Excel formula in the first data row (read the formulas, don't guess from values).
+- Split: which input column / condition decides which rows go to which output sheet (the input is split FIRST).
+  Also state any pre-filter (output has fewer rows than input).
+- Mapping: each mapping table, its key columns and value column, exact vs. approximate (band) lookup, the
+  keys the formulas construct (e.g. RW_KEY) and whether keys are case/space-insensitive.
+- Per output sheet: which mapping table(s) its derived formulas use. Different sheets may have DIFFERENT
+  columns and DIFFERENT formulas – do not force one layout on all.
+- Business constants/thresholds seen in formulas (limits, caps, multipliers) -> become named config constants.
+- Anything ambiguous: list it and state the assumption you made. Do not silently guess.
+
+## Step 2 – Generate the script with these sections (same order as the reference)
+1. DATAIKU CONFIGURATION: DATA_FOLDER_ID, MAPPING_FOLDER_ID (fallback), OUTPUT_FOLDER_ID,
+   TEMPLATE_OUTPUT_FOLDER_ID, SELECTION_MANIFEST_PATH, CATEGORY, name templates
+   ({base}, {run_id}); leave folder ids as placeholders I fill in.
+2. BUSINESS CONFIGURATION: every threshold/constant, column-name constants, SOURCE_COLUMNS,
+   CALCULATED_COLUMNS per output sheet, required columns, allowed value sets, HEADER_ALIASES.
+3. GENERAL HELPERS: path/extension helpers, normalize_column (upper, non-alnum -> _), clean_text,
+   numeric_series (handles %, commas, blanks), yes/no helpers, Dataiku folder read/list/upload.
+4. TABLE DETECTION: scan the first ~100 rows for the header row by counting known column matches
+   (require a few stable columns), handle .xlsx/.xlsm/.xlsb/.csv, skip mapping sheets, drop empty rows.
+5. MAPPING LOADER: read mapping sheets (embedded in the input first, else from the mapping folder),
+   normalise keys, convert weights/rates to numbers, FAIL LOUDLY on non-numeric, duplicate-conflicting or
+   missing required keys.
+6. SPLIT: assign each input row to its output sheet using the learned rule; report rows that match no
+   sheet (never drop silently).
+7. CALCULATION (pandas): per output sheet, derive each column in the order the formulas depend on each
+   other, using the mapping tables. Mirror the Excel logic exactly (same tie-breaking, rounding = Excel
+   half-up, same blank handling). Raise a clear error listing unmapped keys.
+8. EXCEL OUTPUTS:
+   a) values workbook: one sheet per output sheet, styled header, freeze panes, filter, widths.
+   b) formula-template workbook: the data sheets with LIVE Excel formulas per row (SUMIF/INDEX-MATCH/IF
+      etc., referencing the mapping sheets written into the same workbook with absolute ranges),
+      raw pass-through columns kept as values, number formats (%, #,##0.00).
+   Formulas must be written independently of the pandas values and must give the same results.
+9. EXECUTION SCOPE: manifest (selected_inputs.json) support, else all supported files in the folder.
+10. MAIN: per-file try/except, print SUCCESS/FAILED with row counts per sheet, collect failures and raise
+    at the end.
+
+## Rules
+- Keep the reference script's naming, comment density and style. Python 3.8-compatible, only
+  dataiku, pandas, numpy, openpyxl.
+- Do not hard-code row counts, sheet row positions or specific data values; everything must work on a
+  NEW file of the same layout with different data and different row counts.
+- Hard-code only what is business logic (constants, key construction, formulas). Mapping VALUES come
+  from the mapping file at runtime, never embedded in code.
+- No silent fallbacks: missing columns, unmapped keys, unmatched split rows -> explicit error or warning.
+
+## Step 3 – Verify and report
+- Run/mentally execute the script against my attached input and mapping; compare every output column,
+  every sheet, to my sample OUTPUT and report the match % per column and row-count per sheet.
+- List mismatching columns with 3 example rows (input values, expected, got) and fix them before finalising.
+- End with: assumptions made, what to change when (a) data changes (nothing), (b) mapping values change
+  (nothing), (c) layout/formula/threshold changes (which constant or section).
+
+Output order: findings table -> full script in one code block -> verification report.
+
+[Paste or attach the reference Retail script here]
