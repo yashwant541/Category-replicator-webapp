@@ -116,7 +116,7 @@ def _entries(store, files: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 continue
             out.append({"file": f["name"], "sheet": s["sheet"], "role": role, "df": s["df"],
                         "header_row": s["header_row"], "n_formulas": s["n_formulas"], "bytes": data,
-                        "col_offset": s.get("col_offset", 0)})
+                        "col_offset": s.get("col_offset", 0), "grid": s.get("grid")})
     return out
 
 
@@ -350,7 +350,8 @@ def _read_inputs(system: Dict[str, Any], files: List[Tuple[str, bytes]]
 def run_system(store, sid: str, input_files: List[Tuple[str, bytes]],
                mapping_files: Optional[List[Tuple[str, bytes]]] = None,
                expected_file: Optional[Tuple[str, bytes]] = None,
-               live_formulas: bool = False) -> Dict[str, Any]:
+               live_formulas: bool = False,
+               toggle_values: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
     s = get_system(store, sid)
     df, _, used = _read_inputs(s, input_files)
     override = {}
@@ -359,11 +360,12 @@ def run_system(store, sid: str, input_files: List[Tuple[str, bytes]],
             for tname in s["tables"]:
                 if nk(tname) == nk(sh["sheet"]) or nk(tname) == nk(re.sub(r"\.[^.]+$", "", name)):
                     override[tname] = sh["df"]
-    res = engine.apply_system(s, df, override)
+    res = engine.apply_system(s, df, override, toggle_values)
     notes = list(res["notes"])
     if override:
         notes.append("Mapping tables replaced for this run: " + ", ".join(override))
-    summary = [("Input files", [f"{u['file']} / {u['sheet']} ({u['rows']} rows)" for u in used])]
+    tg = {t["name"]: t.get("value") for t in res["toggles"]}
+    summary = [("Toggles used", ", ".join("%s = %s" % kv for kv in tg.items()) or "none"), ("Input files", [f"{u['file']} / {u['sheet']} ({u['rows']} rows)" for u in used])]
     if notes:
         summary.append(("Notes", notes))
     cmp_ = None
@@ -379,7 +381,7 @@ def run_system(store, sid: str, input_files: List[Tuple[str, bytes]],
                 cmp_ = engine.compare_sheets(res["sheets"], ysh)
             summary.append(("Match vs expected output", f"{cmp_.get('match', 0) * 100:.2f}%" if cmp_.get("aligned") else cmp_.get("note")))
     tables = engine.tables_to_frames(s, override)
-    data = engine.write_workbook(s, res["sheets"], res["work"], summary, live_formulas, tables)
+    data = engine.write_workbook(s, res["sheets"], res["work"], summary, live_formulas, tables, res["toggles"])
     rid = dt.datetime.utcnow().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:4]
     store.put(f"runs/{sid}/{rid}/output.xlsx", data)
     preview = {}
@@ -389,7 +391,7 @@ def run_system(store, sid: str, input_files: List[Tuple[str, bytes]],
     meta = {"run_id": rid, "system": sid, "created": _now(), "rows": int(res["rows"]),
             "input_rows": int(res["input_rows"]), "sheets": {k: v["rows"] for k, v in preview.items()},
             "notes": notes, "rule_errors": res["rule_errors"], "inputs": used,
-            "live_formulas": bool(live_formulas), "compare": cmp_,
+            "live_formulas": bool(live_formulas), "compare": cmp_, "toggles": res["toggles"],
             "filename": f"{_slug(s['name'])}_{rid}.xlsx"}
     put_json(store, f"runs/{sid}/{rid}/meta.json", meta)
     return {**meta, "preview": preview}

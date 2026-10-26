@@ -26,7 +26,7 @@ from openpyxl.utils import get_column_letter
 from . import rules as R
 from .learn import Learner, align, build_tree, PERFECT
 from .rules import Ctx, RuleError, apply_rule, cmp_mask, disp, eq_series, is_blank, nk
-from .tables import canonical_columns, df_to_spec, jsonable, spec_to_df
+from .tables import canonical_columns, df_to_spec, jsonable, spec_to_df, yes_no
 
 ENGINE_BUILD = "2026.10a"
 SRC = "Source sheet"
@@ -252,7 +252,7 @@ def build_system(entries: List[Dict[str, Any]], options: Dict[str, Any]) -> Dict
             continue
         nm = _unique_name(e["sheet"] if e["sheet"] not in taken else f"{_stem(e['file'])}_{e['sheet']}", taken)
         taken.add(nm)
-        tables[nm] = df_to_spec(e["df"], e.get("header_row", 0), e.get("col_offset", 0))
+        tables[nm] = df_to_spec(e["df"], e.get("header_row", 0), e.get("col_offset", 0), e.get("grid"))
         table_src[nm] = f"{e['file']} / {e['sheet']}"
     if len(groups) > 1:
         warnings.append("Input sheets with a different layout were kept as reference tables: "
@@ -330,6 +330,7 @@ def build_system(entries: List[Dict[str, Any]], options: Dict[str, Any]) -> Dict
                 except Exception:  # noqa: BLE001
                     warnings.append(f"Formulas reference sheet '{sname}' which was not provided as a mapping.")
     ndf = {n: spec_to_df(s) for n, s in tables.items()}
+    toggles = effective_toggles({"toggles": toggles, "tables": tables}, ndf)
 
     # ---- align + learn
     Xa, included, ainfo, sheet_masks = _align_sheets(X, Y, sheet_col, sheet_columns, out_group)
@@ -434,6 +435,46 @@ def finalize_system(system: Dict[str, Any]) -> None:
 
 
 # ================================================================ applying
+def _cell_addr(a1: str) -> Tuple[int, int]:
+    m = re.match(r"^\$?([A-Za-z]{1,3})\$?(\d+)$", a1.strip())
+    col = 0
+    for ch in m.group(1).upper():
+        col = col * 26 + ord(ch) - 64
+    return int(m.group(2)) - 1, col - 1
+
+
+def effective_toggles(system: Dict[str, Any], frames: Optional[Dict[str, pd.DataFrame]] = None,
+                      overrides: Optional[Dict[str, str]] = None) -> List[Dict[str, Any]]:
+    """Toggle values to use *now*: the Toggle sheet of the (stored or freshly attached) mapping wins over the
+    value seen in the example; an explicit per-run override wins over everything."""
+    frames = frames if frames is not None else tables_to_frames(system)
+    out = []
+    for t in system.get("toggles", []):
+        t = dict(t)
+        val = None
+        if t.get("sheet"):
+            tname = next((n for n in frames if nk(n) == nk(t["sheet"])), None)
+            if tname is not None:
+                df = frames[tname]
+                base = re.sub(r"\s*\(\d+\)$", "", t["name"])
+                if df.shape[1] >= 2:                       # label | value rows
+                    hit = df[df.iloc[:, 0].map(nk).isin([nk(t["name"]), nk(base)])]
+                    if len(hit):
+                        val = yes_no(hit.iloc[0, 1])
+                spec = system.get("tables", {}).get(tname) or {}
+                if val is None and spec.get("grid") and t.get("cell"):    # exact cell of the stored grid
+                    r, c = _cell_addr(t["cell"])
+                    g = spec["grid"]
+                    if r < len(g) and c < len(g[r]):
+                        val = yes_no(g[r][c])
+        if overrides and t["name"] in overrides:
+            val = yes_no(overrides[t["name"]]) or val
+        if val:
+            t["value"] = val
+        out.append(t)
+    return out
+
+
 def tables_to_frames(system: Dict[str, Any], override: Optional[Dict[str, pd.DataFrame]] = None
                      ) -> Dict[str, pd.DataFrame]:
     t = {n: spec_to_df(s) for n, s in system.get("tables", {}).items()}
@@ -601,7 +642,8 @@ def split_frames(system: Dict[str, Any], out: pd.DataFrame, work: pd.DataFrame
 
 
 def apply_system(system: Dict[str, Any], df_in: pd.DataFrame,
-                 table_override: Optional[Dict[str, pd.DataFrame]] = None) -> Dict[str, Any]:
+                 table_override: Optional[Dict[str, pd.DataFrame]] = None,
+                 toggle_override: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
     df, notes = prepare_input(system, df_in)
     n_in = len(df)
     pre = system.get("filters", {}).get("pre", [])
@@ -609,7 +651,9 @@ def apply_system(system: Dict[str, Any], df_in: pd.DataFrame,
         keep = conditions_mask(df, pre).values
         df = df[keep].reset_index(drop=True)
         notes.append(f"Input filter kept {len(df)} of {n_in} rows.")
-    ctx = Ctx(tables_to_frames(system, table_override), system.get("toggles", []))
+    frames = tables_to_frames(system, table_override)
+    toggles_now = effective_toggles(system, frames, toggle_override)
+    ctx = Ctx(frames, toggles_now)
     work, errors = run_rules(system, df, ctx)
     cols = system["output"]["columns"]
     out = work[cols].copy() if len(work) else pd.DataFrame(columns=cols)
@@ -618,7 +662,7 @@ def apply_system(system: Dict[str, Any], df_in: pd.DataFrame,
     for nm, st in ctx.stats.items():
         notes.append(f"'{nm}': {st['unmatched']} row(s) had no match in the mapping "
                      f"(e.g. {', '.join(map(str, st['examples'][:5]))}).")
-    return {"out": out, "work": work, "sheets": sheets, "notes": notes, "rule_errors": errors,
+    return {"out": out, "work": work, "sheets": sheets, "notes": notes, "rule_errors": errors, "toggles": toggles_now,
             "stats": ctx.stats, "input_rows": n_in, "rows": len(out)}
 
 
@@ -728,6 +772,19 @@ def _autosize(ws, header_len: List[int]) -> None:
         ws.column_dimensions[get_column_letter(i)].width = max(8, min(48, w + 2))
 
 
+def _like(orig: Any, yn: str) -> Any:
+    """Write a Yes/No switch in the same style the cell had (TRUE/FALSE, true/false, Yes/No, 1/0)."""
+    on = yn == "Yes"
+    if isinstance(orig, bool):
+        return on
+    if isinstance(orig, (int, float)):
+        return 1 if on else 0
+    t = str(orig or "")
+    word = ("TRUE", "FALSE") if t.lower() in ("true", "false") else (("Y", "N") if t.lower() in ("y", "n") else ("Yes", "No"))
+    w = word[0] if on else word[1]
+    return w.upper() if t.isupper() else (w.lower() if t.islower() else w)
+
+
 def inject_cached(blob: bytes, sheet_names: List[str], cached: Dict[str, Dict[str, Any]]) -> bytes:
     """openpyxl writes formulas without their results; add them so the file shows numbers in any viewer
     (Excel recalculates on open anyway)."""
@@ -761,7 +818,8 @@ def inject_cached(blob: bytes, sheet_names: List[str], cached: Dict[str, Dict[st
 
 def write_workbook(system: Dict[str, Any], sheets: "OrderedDict[str, pd.DataFrame]",
                    work: Optional[pd.DataFrame] = None, summary: Optional[List[Tuple[str, Any]]] = None,
-                   live_formulas: bool = False, tables: Optional[Dict[str, pd.DataFrame]] = None) -> bytes:
+                   live_formulas: bool = False, tables: Optional[Dict[str, pd.DataFrame]] = None,
+                   toggles: Optional[List[Dict[str, Any]]] = None) -> bytes:
     wb = openpyxl.Workbook()
     wb.remove(wb.active)
     rules = {r["name"]: r for r in system["rules"]}
@@ -769,6 +827,9 @@ def write_workbook(system: Dict[str, Any], sheets: "OrderedDict[str, pd.DataFram
     table_sheet: Dict[str, str] = {}
     taken = set(sheets.keys()) | {"Run summary"}
     any_live = False
+    toggles = toggles if toggles is not None else system.get("toggles", [])
+    tog_by_name = {t["name"]: t for t in toggles}
+    param_rows: List[Dict[str, Any]] = []
     cached: Dict[str, Dict[str, Any]] = {}
     incols = system["input"]["columns"]
 
@@ -785,6 +846,24 @@ def write_workbook(system: Dict[str, Any], sheets: "OrderedDict[str, pd.DataFram
         j = list(T.columns).index(R.resolve_col(T, col)) + 1 + int(system.get("tables", {}).get(t, {}).get("col_offset", 0))
         L = get_column_letter(j)
         return f"{R.sheet_token(table_sheet[t])}!${L}:${L}"
+
+    def toggle_ref(name: str) -> str:
+        """Address of a toggle cell in the output workbook (its own Toggle sheet, else a Parameters sheet)."""
+        t = tog_by_name[name]
+        if t.get("sheet") and t.get("cell"):
+            tname = next((n for n in tables if nk(n) == nk(t["sheet"])), None)
+            if tname is not None:
+                if tname not in table_sheet:
+                    table_sheet[tname] = safe_sheet_name(tname, taken)
+                r, c = _cell_addr(t["cell"])
+                return f"{R.sheet_token(table_sheet[tname])}!${get_column_letter(c + 1)}${r + 1}"
+        if name not in [p["name"] for p in param_rows]:
+            param_rows.append(t)
+        idx = [p["name"] for p in param_rows].index(name)
+        return f"Parameters!$B${idx + 2}"
+
+    def resolve_tokens(f: str) -> str:
+        return re.sub(r"\{tok:([^}]*)\}", lambda m: toggle_ref(m.group(1)), f)
 
     def live_for(cols: List[str], sname: str = ""):
         """Excel formulas for this sheet's own column layout (+ helper columns for raw inputs it needs)."""
@@ -806,7 +885,7 @@ def write_workbook(system: Dict[str, Any], sheets: "OrderedDict[str, pd.DataFram
         live: Dict[str, str] = {}
         for name in cols:
             r = rules.get(name)
-            if not r or r.get("disabled") or r["kind"] == "formula" and "{tok:" in (r.get("excel_formula") or ""):
+            if not r or r.get("disabled"):
                 continue
             if r["kind"] == "const" or (r["kind"] == "copy" and nk(r["col"]) == nk(name)):
                 continue          # raw pass-through columns / constants stay plain values (no =A2 self-reference)
@@ -820,6 +899,8 @@ def write_workbook(system: Dict[str, Any], sheets: "OrderedDict[str, pd.DataFram
                         f = None
                 else:
                     f = R.excel_formula(r, ref, table_ref)
+                if f and "{tok:" in f:
+                    f = resolve_tokens(f)
             except Exception:  # noqa: BLE001
                 f = None
             if f:
@@ -864,6 +945,16 @@ def write_workbook(system: Dict[str, Any], sheets: "OrderedDict[str, pd.DataFram
         ws = wb.create_sheet(sn)
         T = tables[t]
         spec = system.get("tables", {}).get(t, {})
+        if spec.get("grid"):                          # Toggle sheet: exact cell layout, current switch values
+            grid = [list(r) for r in spec["grid"]]
+            for tg in toggles:
+                if tg.get("cell") and nk(tg.get("sheet", "")) == nk(t) and tg.get("value"):
+                    r, c = _cell_addr(tg["cell"])
+                    if r < len(grid) and c < len(grid[r]):
+                        grid[r][c] = _like(grid[r][c], tg["value"])
+            for row in grid:
+                ws.append([xl_val(v) for v in row])
+            continue
         pad = [None] * int(spec.get("col_offset", 0))
         for _ in range(int(spec.get("header_row", 0))):
             ws.append([])
@@ -874,6 +965,11 @@ def write_workbook(system: Dict[str, Any], sheets: "OrderedDict[str, pd.DataFram
         for j in range(len(pad) + 1, len(pad) + T.shape[1] + 1):
             ws.cell(row=hr, column=j).font = Font(bold=True)
 
+    if param_rows:
+        ps = wb.create_sheet("Parameters")
+        ps.append(["Name", "Value"])
+        for p in param_rows:
+            ps.append([p["name"], p.get("value")])
     sm = wb.create_sheet("Run summary")
     sm.append(["System", system["name"]])
     sm.append(["Generated", dt.datetime.now().strftime("%Y-%m-%d %H:%M")])

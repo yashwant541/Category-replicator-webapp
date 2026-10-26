@@ -12,7 +12,7 @@ import numpy as np
 import openpyxl
 import pandas as pd
 
-from replicator_formulas.sample_parser import detect_header_row, _headers_from_row, _norm
+from replicator_formulas.sample_parser import detect_header_row, _headers_from_row, _norm, is_toggle_sheet
 from .rules import is_blank, nk
 
 
@@ -113,6 +113,13 @@ def read_workbook(file_bytes: bytes, filename: str, report: Optional[List[Dict[s
             rows = vrows
         else:
             rows = frows
+        grid = None
+        if is_toggle_sheet(name):            # name|Yes/No rows: keep the grid so cell addresses (B2) stay exact
+            grid = [[jsonable(c) for c in r] for r in rows]
+            while grid and not any(c is not None for c in grid[-1]):
+                grid.pop()
+            if grid and grid[0] and len(grid[0]) > 1 and _yn_like(grid[0][1]):     # no header row at all
+                rows = [["Label", "Value"]] + [list(r[:2]) for r in rows]
         df, hr = _rows_to_df(rows)
         if df.empty:
             if report is not None:
@@ -123,8 +130,23 @@ def read_workbook(file_bytes: bytes, filename: str, report: Optional[List[Dict[s
         if unc and report is not None:
             report.append({"sheet": name, "issue": "%d of %d formula cell(s) have no saved result and read as blank "
                            "- open the file in Excel and save it, then upload again" % (unc, nf)})
-        out.append({"sheet": name, "header_row": hr, "df": df, "n_formulas": nf, "col_offset": df.attrs.get("col_offset", 0)})
+        out.append({"sheet": name, "header_row": hr, "df": df, "n_formulas": nf, "col_offset": df.attrs.get("col_offset", 0),
+                    "grid": grid})
     return out
+
+
+def _yn_like(v: Any) -> bool:
+    return str(v).strip().lower() in ("yes", "no", "y", "n", "true", "false", "1", "0")
+
+
+def yes_no(raw: Any) -> Optional[str]:
+    """Toggle cell value -> 'Yes' / 'No' (None when it isn't a switch value)."""
+    s = str(raw).strip().lower() if raw is not None else ""
+    if s in ("yes", "y", "true", "1"):
+        return "Yes"
+    if s in ("no", "n", "false", "0"):
+        return "No"
+    return None
 
 
 def guess_role(filename: str, sheet: str, n_formulas: int, is_first: bool) -> str:
@@ -136,10 +158,11 @@ def guess_role(filename: str, sheet: str, n_formulas: int, is_first: bool) -> st
     return "input"
 
 
-def df_to_spec(df: pd.DataFrame, header_row: int = 0, col_offset: int = 0) -> Dict[str, Any]:
+def df_to_spec(df: pd.DataFrame, header_row: int = 0, col_offset: int = 0, grid: Any = None) -> Dict[str, Any]:
     recs = [{c: jsonable(v) for c, v in zip(df.columns, row)}
             for row in df.itertuples(index=False, name=None)]
-    return {"headers": [str(c) for c in df.columns], "records": recs, "header_row": int(header_row), "col_offset": int(col_offset)}
+    return {"headers": [str(c) for c in df.columns], "records": recs, "header_row": int(header_row), "col_offset": int(col_offset),
+            **({"grid": grid} if grid else {})}
 
 
 def spec_to_df(spec: Dict[str, Any]) -> pd.DataFrame:

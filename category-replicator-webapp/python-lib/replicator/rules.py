@@ -568,6 +568,9 @@ def _xl_const(c: Any) -> str:
 
 
 def sheet_token(name: str) -> str:
+    """Sheet name as Excel writes it in a formula: quoted only when it has to be."""
+    if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.]*", name) and not re.fullmatch(r"[A-Za-z]{1,3}\d+", name):
+        return name
     return "'" + name.replace("'", "''") + "'"
 
 

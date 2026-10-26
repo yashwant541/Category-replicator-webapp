@@ -181,8 +181,13 @@ def api_run(sid):
     if not inputs:
         raise ValueError("Upload at least one input file.")
     exp = _files("expected")
+    import json as _json
+    try:
+        tv = _json.loads(request.form.get("toggles") or "{}")
+    except ValueError:
+        tv = {}
     res = service.run_system(store(), sid, inputs, _files("mappings"), exp[0] if exp else None,
-                             request.form.get("live_formulas") in ("1", "true", "on"))
+                             request.form.get("live_formulas") in ("1", "true", "on"), tv or None)
     return ok(run=res)
 
 

@@ -376,7 +376,14 @@
   /* ---------------------------------------------------------------- run tab */
   function tabRun(body) {
     const s = SYS;
-    const files = { in: [], map: [], exp: [] }; let live = true;
+    const files = { in: [], map: [], exp: [] }; let live = true; const tog = {};
+    const togBox = (s.toggles || []).length ? h("div", { class: "card", style: "margin:12px 0 0;box-shadow:none;background:var(--surface-2)" }, [
+      h("h3", { text: "Toggles used by the formulas" }),
+      h("div", { class: "muted small", text: "Taken from the Toggle sheet of your mapping (attach an updated mapping to change them for good) — or override for this run only:" }),
+      ...(s.toggles || []).map(t => h("div", { class: "cond" }, [h("b", { text: t.name }),
+        h("select", { class: "inl", onchange: e => { tog[t.name] = e.target.value; } },
+          ["Yes", "No"].map(v => h("option", { value: v, text: v, ...(t.value === v ? { selected: true } : {}) }))),
+        h("span", { class: "muted small", text: t.sheet ? "(" + t.sheet + "!" + t.cell + ")" : "" })]))]) : null;
     function zone(key, title, sub, multiple) {
       const list = h("div", { class: "small muted", style: "margin-top:6px" });
       const refresh = () => { list.textContent = files[key].map(f => f.name).join(", "); };
@@ -395,6 +402,7 @@
       const fd = new FormData();
       files.in.forEach(f => fd.append("files", f)); files.map.forEach(f => fd.append("mappings", f)); files.exp.forEach(f => fd.append("expected", f));
       if (live) fd.append("live_formulas", "1");
+      if (Object.keys(tog).length) fd.append("toggles", JSON.stringify(tog));
       btn.disabled = true; btn.textContent = "Running…";
       try { LAST_RUN = (await call("/api/systems/" + s.id + "/run", { method: "POST", body: fd })).run; showRun(out, LAST_RUN); }
       catch (e) { toast(e.message, true); }
@@ -405,6 +413,7 @@
       h("div", { class: "grid g3", style: "margin-top:12px" }, [zone("in", "Input file(s)", "Drop new input here", true),
         zone("map", "Updated mappings (optional)", "Replace stored mapping tables for this run", true),
         zone("exp", "Expected output (optional)", "Compare the result to a known answer", false)]),
+      togBox,
       h("div", { class: "row", style: "margin-top:14px" }, [
         h("label", { class: "small" }, [h("input", { type: "checkbox", checked: true, onchange: e => { live = e.target.checked; } }), " Write the formulas into the output cells (untick for plain values)"]),
         h("span", { class: "spacer" }), btn])]));
@@ -420,6 +429,7 @@
         h("div", {}, [h("b", { text: run.rows }), h("span", { text: "output rows" })]),
         h("div", {}, [h("b", { text: Object.keys(run.sheets).length }), h("span", { text: "sheet(s)" })]),
         run.compare && run.compare.aligned ? h("div", {}, [h("b", { text: fmtPct(run.compare.match) }), h("span", { text: "match vs expected" })]) : null])]);
+    if ((run.toggles || []).length) card.appendChild(h("div", { class: "note good", text: "Toggles used: " + run.toggles.map(t => t.name + " = " + t.value).join(", ") }));
     (run.notes || []).forEach(n => card.appendChild(h("div", { class: "note", text: n })));
     Object.keys(run.rule_errors || {}).forEach(k => card.appendChild(h("div", { class: "note err", text: k + ": " + run.rule_errors[k] })));
     if (run.compare) {
@@ -515,7 +525,8 @@
     names.forEach(n => {
       const t = SYS.tables[n];
       body.appendChild(h("div", { class: "card" }, [h("div", { class: "row" }, [h("h2", { text: n, style: "margin:0" }), h("span", { class: "pill", text: t.records.length + " rows" }), h("span", { class: "spacer" }),
-        h("span", { class: "muted small", text: (SYS.table_sources[n] || "") + (used[n] ? " · used by " + used[n].join(", ") : " · not used by any rule") }),
+        h("span", { class: "muted small", text: (SYS.table_sources[n] || "") + (used[n] ? " · used by " + used[n].join(", ")
+          : ((SYS.toggles || []).some(g => g.sheet === n) ? " · toggle sheet: " + SYS.toggles.filter(g => g.sheet === n).map(g => g.name + " = " + g.value).join(", ") : " · not used by any rule")) }),
         h("button", { class: "btn ghost small", text: "Download", onclick: () => dl("/api/systems/" + SYS.id + "/tables/" + encodeURIComponent(n) + "/download") })]),
         h("div", { class: "scroll", style: "margin-top:10px;max-height:260px" }, [h("table", { class: "t" }, [h("thead", {}, [h("tr", {}, t.headers.map(x => h("th", { text: x })))]),
           h("tbody", {}, t.records.slice(0, 40).map(r => h("tr", {}, t.headers.map(x => h("td", { text: r[x] == null ? "" : String(r[x]) })))))])])]));

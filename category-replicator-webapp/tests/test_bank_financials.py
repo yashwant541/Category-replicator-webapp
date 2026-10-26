@@ -92,5 +92,5 @@ def test_live_formulas_no_self_reference_and_cached(system):
     j = hdr.index("Review_Flag") + 1
     assert str(ws.cell(2, j).value).startswith("=IF(") and wv.cell(2, j).value in ("OK", "REVIEW")
     j = hdr.index("GL_Code") + 1
-    assert "INDEX('Mapping'" in ws.cell(2, j).value and wv.cell(2, j).value == "GL-6200"
+    assert "INDEX(Mapping!" in ws.cell(2, j).value and wv.cell(2, j).value == "GL-6200"
     assert "Mapping" in f.sheetnames

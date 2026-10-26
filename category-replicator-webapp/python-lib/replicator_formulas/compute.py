@@ -194,6 +194,8 @@ def _as_frame(args, index):
 
 
 def IF(cond, a, b):
+    if not isinstance(cond, (pd.Series, np.ndarray)):       # a single switch (toggle / constant), not a column
+        cond = False if (isinstance(cond, float) and np.isnan(cond)) else bool(cond)
     idx = _series_index(cond, a, b)
     if idx is not None:
         return pd.Series(np.where(cond, a, b), index=idx)
@@ -401,6 +403,16 @@ class ToggleValue(str):
 
     def __bool__(self) -> bool:
         return self.strip().lower() in ("yes", "true", "y", "1")
+
+    def __eq__(self, other):
+        if isinstance(other, bool):          # IF(Toggle!B2=TRUE, ...)
+            return bool(self) == other
+        return str.__eq__(self, other)
+
+    def __ne__(self, other):
+        return not self.__eq__(other)
+
+    __hash__ = str.__hash__
 
 
 def _toggle_value(raw: Any) -> ToggleValue:
