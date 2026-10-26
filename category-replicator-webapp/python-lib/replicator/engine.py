@@ -628,6 +628,83 @@ def finalize_system(system: Dict[str, Any]) -> None:
     system["input"]["required"] = required
 
 
+# =============================================================== editing stored formulas
+def check_formula(text: str) -> Optional[str]:
+    """Light sanity check (the app never evaluates formulas): looks like a formula, quotes and brackets balance."""
+    t = (text or "").strip()
+    if not t.startswith("="):
+        return "a formula must start with ="
+    if len(t) < 2:
+        return "the formula is empty"
+    if "\n" in t or "\r" in t:
+        return "use a single line"
+    depth, in_q, in_s = 0, False, False
+    for ch in t:
+        if ch == '"' and not in_s:
+            in_q = not in_q
+        elif ch == "'" and not in_q:
+            in_s = not in_s
+        elif not in_q and not in_s:
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+                if depth < 0:
+                    return "a ) has no matching ("
+    if in_q:
+        return 'a " quote is not closed'
+    if in_s:
+        return "a ' quote is not closed"
+    if depth:
+        return "%d ( not closed" % depth
+    return None
+
+
+def apply_formula_edits(system: Dict[str, Any], edits: List[Dict[str, Any]]) -> int:
+    """edits: [{sheet, column, raw}] - ``raw`` is the formula as typed for the column's first data row.
+    An empty ``raw`` clears the formula.  The original text is remembered (``orig``) so it can be reset."""
+    by = {d["name"]: d for d in system["sheets"]}
+    errors: List[str] = []
+    plan = []
+    for e in edits:
+        d = by.get(e.get("sheet"))
+        c = next((x for x in d["columns"] if x["name"] == e.get("column")), None) if d else None
+        if c is None:
+            errors.append("%s / %s: no such column" % (e.get("sheet"), e.get("column")))
+            continue
+        if c["kind"] == "input":
+            errors.append("%s / %s: this is an input column, not a formula column" % (d["name"], c["name"]))
+            continue
+        raw = (e.get("raw") or "").strip()
+        if raw:
+            err = check_formula(raw)
+            if err:
+                errors.append("%s / %s: %s" % (d["name"], c["name"], err))
+                continue
+        plan.append((d, c, raw))
+    if errors:
+        raise ValueError("; ".join(errors[:5]) + (" ..." if len(errors) > 5 else ""))
+    n = 0
+    for d, c, raw in plan:
+        before = c.get("raw", "")
+        if raw == before:
+            continue
+        c.setdefault("orig", before)
+        if raw:
+            if c["kind"] != "formula":
+                c["kind"] = "formula"
+                c["sample_row"] = d["origin"]["row"] + 2          # typed for the first data row
+            c["raw"] = raw
+        else:
+            c["kind"] = "empty"
+            c.pop("raw", None)
+            c.pop("sample_row", None)
+        if c.get("orig") == c.get("raw", ""):                      # back to the original: nothing is "edited"
+            c.pop("orig", None)
+        n += 1
+    return n
+
+
 # ======================================================================= applying it
 def _sheet_frame(d: Dict[str, Any], rows: pd.DataFrame) -> pd.DataFrame:
     """The sheet as it will be written: pasted input values + the sample's formulas filled down (nothing else)."""

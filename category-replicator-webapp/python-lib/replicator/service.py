@@ -252,6 +252,8 @@ def update_system(store, sid: str, patch: Dict[str, Any]) -> Dict[str, Any]:
     for k in ("filters", "toggles"):
         if k in patch:
             s[k] = patch[k]
+    if patch.get("formulas"):
+        engine.apply_formula_edits(s, patch["formulas"])
     if "tables" in patch:  # replace mapping tables (e.g. refreshed rates)
         for n, spec in patch["tables"].items():
             s["tables"][n] = spec

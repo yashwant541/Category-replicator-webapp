@@ -275,11 +275,11 @@
         h("button", { class: "btn ghost small", text: "Rebuild", onclick: relearn }),
         h("button", { class: "btn ghost danger small", text: "Delete", onclick: async () => { if (!confirm("Delete system '" + s.name + "'?")) return;
           await call("/api/systems/" + s.id, { method: "DELETE" }); SYS = null; location.hash = "#/"; } })])]));
-    const tabs = [["rules", "Template"], ["run", "Run on new data"], ["filters", "Filters & outputs"], ["maps", "Mappings"], ["history", "History"]];
+    const tabs = [["rules", "Template"], ["formulas", "Formulas"], ["run", "Run on new data"], ["filters", "Filters & outputs"], ["maps", "Mappings"], ["history", "History"]];
     root.appendChild(h("div", { class: "tabs" }, tabs.map(([k, l]) => h("a", { class: "tab" + (tab === k ? " on" : ""), href: "#/s/" + s.id + "/" + k, text: l }))));
     const body = h("div", {});
     root.appendChild(body);
-    ({ rules: tabRules, run: tabRun, filters: tabFilters, maps: tabMaps, history: tabHistory }[tab] || tabRules)(body);
+    ({ rules: tabRules, formulas: tabFormulas, run: tabRun, filters: tabFilters, maps: tabMaps, history: tabHistory }[tab] || tabRules)(body);
   }
 
   async function relearn() {
@@ -314,13 +314,115 @@
           h("tbody", {}, d.columns.map(c => h("tr", {}, [
             h("td", { class: "mono", text: col(c.col) + (d.origin.row + 1) }), h("td", {}, [h("b", { text: c.name })]),
             c.kind === "input" ? h("td", {}, [h("span", { class: "pill acc", text: "input" }), " pasted from the input column ", h("b", { text: c.source })])
-              : c.kind === "formula" ? h("td", {}, [h("span", { class: "pill ok", text: "formula" }), " ", h("span", { class: "desc", text: c.raw })])
+              : c.kind === "formula" ? h("td", {}, [h("span", { class: "pill ok", text: "formula" }), c.orig !== undefined ? h("span", { class: "pill manual", text: "edited", style: "margin-left:4px" }) : null, " ", h("span", { class: "desc", text: c.raw })])
               : h("td", {}, [h("span", { class: "pill warn", text: "empty" }), " no formula in the sample"])])))])]),
         (d.params || []).length ? h("div", { class: "muted small", style: "margin-top:8px", text: "Parameter cell(s) the formulas point at: " + d.params.map(p => p.cell + " = " + p.value).join(", ") }) : null]));
     });
     body.appendChild(h("div", { class: "card" }, [h("h3", { text: "Also written into every output workbook" }),
       h("div", { class: "row small" }, [...Object.keys(s.tables).map(t => h("span", { class: "pill warn", text: t + ((s.toggles || []).some(g => g.sheet === t) ? " (toggle)" : " (mapping)") })),
         h("span", { class: "pill", text: "Run summary" })])]));
+  }
+
+  /* ------------------------------------------------------------- formulas tab */
+  // The same fill-down rule the server uses (row numbers without a $ move; $ refs, ranges' $ parts, sheet names and text stay).
+  function shiftF(f, from, to) {
+    const d = to - from; if (!d || !f) return f;
+    const parts = f.split(/("(?:[^"]|"")*"|'(?:[^']|'')*')/);
+    for (let i = 0; i < parts.length; i += 2) {
+      parts[i] = parts[i].replace(/(?<![A-Za-z0-9_.])(\$?)([A-Z]{1,3})(\$?)(\d+)(?![\d(A-Za-z_!])/g,
+        (m, a, b, c, e) => (c === "$" || +e + d < 1) ? m : a + b + c + (+e + d));
+    }
+    return parts.join("");
+  }
+  const colLetter = n => { let t = ""; n += 1; while (n > 0) { const m = (n - 1) % 26; t = String.fromCharCode(65 + m) + t; n = Math.floor((n - 1) / 26); } return t; };
+
+  function tabFormulas(body) {
+    const s = SYS;
+    const edits = {};                                   // "sheet\u0001column" -> text typed (only when different from saved)
+    const K = (sh, c) => sh + "\u0001" + c;
+    const rows = [];                                    // every derived (formula / empty) cell of the template
+    s.sheets.forEach(d => d.columns.forEach(c => { if (c.kind !== "input") rows.push({ d, c, key: K(d.name, c.name), inp: null, prev: null, badge: null, undo: null }); }));
+    const saved = r => r.c.raw || "";
+    const current = r => (r.key in edits) ? edits[r.key] : saved(r);
+    const rowOf = r => r.c.sample_row || (r.d.origin.row + 2);
+    const norm = r => saved(r) ? shiftF(saved(r), rowOf(r), 1) : null;
+    const same = {}; rows.forEach(r => { const n = norm(r); if (n) same[n] = (same[n] || 0) + 1; });
+
+    const pendingLbl = h("span", { class: "muted small" });
+    const saveBtn = h("button", { class: "btn", text: "Save formula changes", disabled: true, onclick: save });
+    const discardBtn = h("button", { class: "btn ghost", text: "Discard", disabled: true, onclick: () => { Object.keys(edits).forEach(k => delete edits[k]); rows.forEach(refresh); update(); } });
+
+    function refresh(r) {
+      const t = current(r), changed = (r.key in edits);
+      r.inp.value = t;
+      r.inp.style.borderColor = changed ? "var(--warn)" : "";
+      const nxt = t ? shiftF(t, rowOf(r), rowOf(r) + 1) : "";
+      r.prev.textContent = t ? nxt : "—";
+      r.badge.textContent = changed ? "unsaved" : (r.c.orig !== undefined ? "edited" : (saved(r) ? "" : "empty"));
+      r.badge.className = "pill " + (changed ? "warn" : (r.c.orig !== undefined ? "manual" : (saved(r) ? "" : "bad")));
+      r.badge.style.display = r.badge.textContent ? "" : "none";
+    }
+    function setText(r, t) {
+      if (t === saved(r)) delete edits[r.key]; else edits[r.key] = t;
+      refresh(r); update();
+    }
+    function update() {
+      const n = Object.keys(edits).length;
+      saveBtn.disabled = !n; discardBtn.disabled = !n;
+      pendingLbl.textContent = n ? n + " unsaved change(s)" : "No unsaved changes";
+    }
+    async function save() {
+      const payload = Object.keys(edits).map(k => { const [sheet, column] = k.split("\u0001"); return { sheet, column, raw: edits[k] }; });
+      saveBtn.disabled = true;
+      try {
+        SYS = (await call("/api/systems/" + SYS.id, { method: "PUT", json: { formulas: payload } })).system;
+        toast(payload.length + " formula(s) saved"); renderSystem("formulas");
+      } catch (e) { toast(e.message, true); saveBtn.disabled = false; err.textContent = e.message; err.style.display = ""; }
+    }
+
+    const err = h("div", { class: "note err", style: "display:none" });
+    const fIn = h("input", { type: "text", class: "inl", placeholder: "find, e.g. $B$3", style: "min-width:200px" });
+    const rIn = h("input", { type: "text", class: "inl", placeholder: "replace with, e.g. $B$9", style: "min-width:200px" });
+    const scope = h("select", { class: "inl" }, [h("option", { value: "", text: "all sheets" }), ...s.sheets.map(d => h("option", { value: d.name, text: d.name }))]);
+    const hits = h("span", { class: "muted small" });
+    function doReplace() {
+      const f = fIn.value; if (!f) return toast("Type the text to find", true);
+      let n = 0;
+      rows.forEach(r => { if (scope.value && r.d.name !== scope.value) return; const t = current(r);
+        if (t && t.indexOf(f) >= 0) { setText(r, t.split(f).join(rIn.value)); n++; } });
+      hits.textContent = n ? n + " formula(s) changed — review, then save" : "no formula contains that text";
+    }
+
+    body.appendChild(h("div", { class: "card" }, [
+      h("div", { class: "row" }, [h("h2", { text: "Formulas", style: "margin:0" }), h("span", { class: "spacer" }), pendingLbl, discardBtn, saveBtn]),
+      h("div", { class: "muted small", text: "Every derived cell of the template: its sheet, address and formula. Edit the text — fix a reference, point at another mapping range, change the logic — and save. Type each formula as it would read on the FIRST data row; every other row is the same text moved down (fill-down). Clear the box to leave the column empty; fill an empty one to add a formula." }),
+      h("div", { class: "row", style: "margin-top:10px" }, [h("b", { class: "small", text: "Find & replace" }), fIn, rIn, scope,
+        h("button", { class: "btn ghost small", text: "Replace in formulas", onclick: doReplace }), hits]),
+      err]));
+
+    s.sheets.forEach(d => {
+      const mine = rows.filter(r => r.d === d);
+      if (!mine.length) { body.appendChild(h("div", { class: "card" }, [h("b", { text: d.name }), h("span", { class: "muted small", text: "  — every column is an input column; no formulas on this sheet." })])); return; }
+      body.appendChild(h("div", { class: "card" }, [
+        h("div", { class: "row" }, [h("h3", { text: d.name, style: "margin:0" }), h("span", { class: "muted small", text: mine.length + " derived column(s)" })]),
+        h("div", { class: "scroll", style: "margin-top:8px;max-height:none" }, [h("table", { class: "t" }, [
+          h("thead", {}, [h("tr", {}, ["Cell", "Column", "Formula (as on the first data row)", "Next row reads", ""].map(x => h("th", { text: x })))]),
+          h("tbody", {}, mine.map(r => {
+            r.inp = h("input", { type: "text", class: "mono", spellcheck: "false", placeholder: "= no formula in the sample — type one to add it", style: "width:100%;font-size:12.5px",
+              oninput: e => setText(r, e.target.value) });
+            r.prev = h("span", { class: "desc muted" });
+            r.badge = h("span", { class: "pill" });
+            r.undo = h("button", { class: "icon-btn", title: "Back to the formula from your sample", text: "↺", style: "display:" + (r.c.orig !== undefined ? "" : "none"),
+              onclick: () => setText(r, r.c.orig) });
+            const n = same[norm(r)];
+            const tr = h("tr", {}, [h("td", { class: "mono", text: colLetter(r.c.col) + rowOf(r), style: "white-space:nowrap" }),
+              h("td", {}, [h("b", { text: r.c.name }), n > 1 ? h("div", { class: "muted small", text: "same formula in " + (n - 1) + " other place(s)" }) : null]),
+              h("td", { style: "min-width:340px" }, [r.inp]), h("td", {}, [r.prev]), h("td", { style: "white-space:nowrap" }, [r.badge, " ", r.undo])]);
+            refresh(r);
+            return tr;
+          }))])])]));
+    });
+    update();
   }
 
   /* ---------------------------------------------------------------- run tab */

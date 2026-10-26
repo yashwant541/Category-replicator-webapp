@@ -28,7 +28,9 @@ restart the backend.
 1. **New system** → name → upload input / mapping / expected output (each sheet gets a role you can change; a workbook may mix roles;
    mapping/toggle sheets inside the output file are recognised).
 2. **Template** tab shows every sheet: cell, column, "input" (pasted) or "formula" (the stored text).
-3. **Run on new data** → drop new input → download the `.xlsx`.
+3. **Formulas** tab: every derived cell (sheet, address, formula, what the next row reads). Edit a formula or a reference, use
+   find & replace across sheets, add a formula to an empty column, then save. The original stays one click away (↺).
+4. **Run on new data** → drop new input → download the `.xlsx`.
 
 Local preview: `python dev/serve.py` → http://localhost:5181. Sample data: `dev/sample_data/` (`python dev/make_dummy_data.py`).
 Tests: `cd tests && python -m pytest -q`.
