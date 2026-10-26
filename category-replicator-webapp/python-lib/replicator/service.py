@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime as dt
 import io
+import threading
 import re
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
@@ -15,6 +16,7 @@ from .rules import nk
 from .store import delete_prefix, get_json, put_json
 from .tables import formula_sheet_refs, guess_role, jsonable, read_workbook, summarize, canonical_columns
 
+_DRAFT_LOCK = threading.RLock()   # serialises the draft record update (uploads can overlap)
 ALLOWED = (".xlsx", ".xlsm", ".xls", ".csv", ".txt")
 ROLES = ("input", "mapping", "output", "ignore")
 
@@ -42,17 +44,21 @@ def get_draft(store, did: str) -> Dict[str, Any]:
 
 
 def add_draft_files(store, did: str, files: List[Tuple[str, bytes]], hint: str = "") -> Dict[str, Any]:
-    d = get_draft(store, did)
-    for name, data in files:
+    get_draft(store, did)                      # fail early if the draft is unknown
+    entries = []
+    for name, data in files:                   # slow part (parsing) runs outside the lock
         if not name.lower().endswith(ALLOWED):
             raise ValueError(f"{name}: unsupported file type (use .xlsx, .xls or .csv)")
-        sheets = read_workbook(data, name)
+        report: List[Dict[str, Any]] = []
+        sheets = read_workbook(data, name, report)
         if not sheets:
-            raise ValueError(f"{name}: no data found")
+            why = "; ".join("%s %s" % (r["sheet"], r["issue"]) for r in report)
+            raise ValueError(f"{name}: no data found" + (f" ({why})" if why else ""))
         fid = uuid.uuid4().hex[:8]
-        store.put(f"drafts/{did}/files/{fid}_{_slug(name)}", data)
+        path = f"drafts/{did}/files/{fid}_{_slug(name)}"
+        store.put(path, data)
         fr = formula_sheet_refs(data, name) if hint == "output" else {"referenced": set()}
-        ent = {"fid": fid, "name": name, "path": f"drafts/{did}/files/{fid}_{_slug(name)}", "sheets": []}
+        ent = {"fid": fid, "name": name, "path": path, "sheets": [], "issues": report}
         for i, s in enumerate(sheets):
             role = hint if hint in ROLES and hint != "ignore" else guess_role(name, s["sheet"], s["n_formulas"], i == 0)
             if guess_role(name, s["sheet"], s["n_formulas"], i == 0) == "ignore" and hint in ("input", "mapping"):
@@ -62,32 +68,39 @@ def add_draft_files(store, did: str, files: List[Tuple[str, bytes]], hint: str =
                 # an output workbook often carries the mapping sheets its formulas use
                 if fr["referenced"] and s["sheet"] in fr["referenced"]:
                     role = "mapping"
+                elif any(x["n_formulas"] for x in sheets) and not s["n_formulas"]                         and guess_role("", s["sheet"], 0, False) == "mapping":
+                    role = "mapping"      # value-only sheet called Rates / Lookup / Mapping next to formula sheets
             ent["sheets"].append({"sheet": s["sheet"], "role": role, "n_formulas": s["n_formulas"],
                                   "header_row": s["header_row"], **summarize(s["df"])})
-        d["files"].append(ent)
-    put_json(store, f"drafts/{did}/draft.json", d)
+        entries.append(ent)
+    with _DRAFT_LOCK:                          # tiny read-modify-write: never lose a concurrent upload
+        d = get_draft(store, did)
+        d["files"].extend(entries)
+        put_json(store, f"drafts/{did}/draft.json", d)
     return d
 
 
 def set_draft_roles(store, did: str, roles: Dict[str, str]) -> Dict[str, Any]:
-    d = get_draft(store, did)
-    for f in d["files"]:
-        for s in f["sheets"]:
-            k = f"{f['fid']}|{s['sheet']}"
-            if k in roles and roles[k] in ROLES:
-                s["role"] = roles[k]
-    put_json(store, f"drafts/{did}/draft.json", d)
-    return d
+    with _DRAFT_LOCK:
+        d = get_draft(store, did)
+        for f in d["files"]:
+            for s in f["sheets"]:
+                k = f"{f['fid']}|{s['sheet']}"
+                if k in roles and roles[k] in ROLES:
+                    s["role"] = roles[k]
+        put_json(store, f"drafts/{did}/draft.json", d)
+        return d
 
 
 def remove_draft_file(store, did: str, fid: str) -> Dict[str, Any]:
-    d = get_draft(store, did)
-    for f in d["files"]:
-        if f["fid"] == fid:
-            store.delete(f["path"])
-    d["files"] = [f for f in d["files"] if f["fid"] != fid]
-    put_json(store, f"drafts/{did}/draft.json", d)
-    return d
+    with _DRAFT_LOCK:
+        d = get_draft(store, did)
+        for f in d["files"]:
+            if f["fid"] == fid:
+                store.delete(f["path"])
+        d["files"] = [f for f in d["files"] if f["fid"] != fid]
+        put_json(store, f"drafts/{did}/draft.json", d)
+        return d
 
 
 def _entries(store, files: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -102,7 +115,8 @@ def _entries(store, files: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             if role == "ignore":
                 continue
             out.append({"file": f["name"], "sheet": s["sheet"], "role": role, "df": s["df"],
-                        "header_row": s["header_row"], "n_formulas": s["n_formulas"], "bytes": data})
+                        "header_row": s["header_row"], "n_formulas": s["n_formulas"], "bytes": data,
+                        "col_offset": s.get("col_offset", 0)})
     return out
 
 

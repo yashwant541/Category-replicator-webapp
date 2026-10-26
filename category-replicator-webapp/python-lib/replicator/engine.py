@@ -252,7 +252,7 @@ def build_system(entries: List[Dict[str, Any]], options: Dict[str, Any]) -> Dict
             continue
         nm = _unique_name(e["sheet"] if e["sheet"] not in taken else f"{_stem(e['file'])}_{e['sheet']}", taken)
         taken.add(nm)
-        tables[nm] = df_to_spec(e["df"], e.get("header_row", 0))
+        tables[nm] = df_to_spec(e["df"], e.get("header_row", 0), e.get("col_offset", 0))
         table_src[nm] = f"{e['file']} / {e['sheet']}"
     if len(groups) > 1:
         warnings.append("Input sheets with a different layout were kept as reference tables: "
@@ -728,6 +728,37 @@ def _autosize(ws, header_len: List[int]) -> None:
         ws.column_dimensions[get_column_letter(i)].width = max(8, min(48, w + 2))
 
 
+def inject_cached(blob: bytes, sheet_names: List[str], cached: Dict[str, Dict[str, Any]]) -> bytes:
+    """openpyxl writes formulas without their results; add them so the file shows numbers in any viewer
+    (Excel recalculates on open anyway)."""
+    import zipfile
+    from xml.sax.saxutils import escape
+    zin = zipfile.ZipFile(io.BytesIO(blob))
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zout:
+        for item in zin.infolist():
+            data = zin.read(item.filename)
+            m = re.match(r"xl/worksheets/sheet(\d+)\.xml$", item.filename)
+            if m and int(m.group(1)) <= len(sheet_names):
+                vals = cached.get(sheet_names[int(m.group(1)) - 1]) or {}
+
+                def fix(mm):
+                    coord, attrs, f = mm.group(1), mm.group(2), mm.group(3)
+                    v = vals.get(coord)
+                    if v is None or (isinstance(v, float) and np.isnan(v)) or isinstance(v, (dt.date, pd.Timestamp)):
+                        return mm.group(0)
+                    attrs = re.sub(r'\s+t="[^"]*"', "", attrs)
+                    if isinstance(v, (bool, np.bool_)):
+                        return '<c r="%s"%s t="b"><f>%s</f><v>%d</v></c>' % (coord, attrs, f, int(v))
+                    if isinstance(v, (int, float, np.integer, np.floating)):
+                        return '<c r="%s"%s><f>%s</f><v>%s</v></c>' % (coord, attrs, f, repr(float(v)) if not float(v).is_integer() else int(v))
+                    return '<c r="%s"%s t="str"><f>%s</f><v>%s</v></c>' % (coord, attrs, f, escape(str(v)))
+                text = re.sub(r'<c r="([A-Z]+\d+)"([^>]*)><f>(.*?)</f><v\s*/?>(?:</v>)?</c>', fix, data.decode("utf-8"))
+                data = text.encode("utf-8")
+            zout.writestr(item, data)
+    return out.getvalue()
+
+
 def write_workbook(system: Dict[str, Any], sheets: "OrderedDict[str, pd.DataFrame]",
                    work: Optional[pd.DataFrame] = None, summary: Optional[List[Tuple[str, Any]]] = None,
                    live_formulas: bool = False, tables: Optional[Dict[str, pd.DataFrame]] = None) -> bytes:
@@ -738,6 +769,7 @@ def write_workbook(system: Dict[str, Any], sheets: "OrderedDict[str, pd.DataFram
     table_sheet: Dict[str, str] = {}
     taken = set(sheets.keys()) | {"Run summary"}
     any_live = False
+    cached: Dict[str, Dict[str, Any]] = {}
     incols = system["input"]["columns"]
 
     if live_formulas:
@@ -750,17 +782,17 @@ def write_workbook(system: Dict[str, Any], sheets: "OrderedDict[str, pd.DataFram
 
     def table_ref(t, col):
         T = tables[t]
-        j = list(T.columns).index(R.resolve_col(T, col)) + 1
+        j = list(T.columns).index(R.resolve_col(T, col)) + 1 + int(system.get("tables", {}).get(t, {}).get("col_offset", 0))
         L = get_column_letter(j)
         return f"{R.sheet_token(table_sheet[t])}!${L}:${L}"
 
-    def live_for(cols: List[str]):
+    def live_for(cols: List[str], sname: str = ""):
         """Excel formulas for this sheet's own column layout (+ helper columns for raw inputs it needs)."""
         letters = {c: get_column_letter(i + 1) for i, c in enumerate(cols)}
         helpers = []
         for r in system["rules"]:
-            if r["name"] not in cols:
-                continue
+            if r["name"] not in cols or r["kind"] == "formula":
+                continue          # formulas copied from the example only use this sheet's own columns
             for c in R.rule_columns(r):
                 if c not in letters and c in incols and c not in helpers:
                     helpers.append(c)
@@ -776,8 +808,18 @@ def write_workbook(system: Dict[str, Any], sheets: "OrderedDict[str, pd.DataFram
             r = rules.get(name)
             if not r or r.get("disabled") or r["kind"] == "formula" and "{tok:" in (r.get("excel_formula") or ""):
                 continue
+            if r["kind"] == "const" or (r["kind"] == "copy" and nk(r["col"]) == nk(name)):
+                continue          # raw pass-through columns / constants stay plain values (no =A2 self-reference)
             try:
-                f = R.excel_formula(r, ref, table_ref)
+                if r["kind"] == "formula":
+                    # the formula as written in the example: valid only on the layout it was read from
+                    trained = (system["output"].get("sheet_columns") or {}).get(sname)
+                    src_r = (r.get("by_sheet") or {}).get(sname) or (list(r["by_sheet"].values())[0] if r.get("by_sheet") else r)
+                    f = src_r.get("excel_formula") or None
+                    if f and trained is not None and list(trained) != list(cols):
+                        f = None
+                else:
+                    f = R.excel_formula(r, ref, table_ref)
             except Exception:  # noqa: BLE001
                 f = None
             if f:
@@ -787,7 +829,8 @@ def write_workbook(system: Dict[str, Any], sheets: "OrderedDict[str, pd.DataFram
     for sname, df in sheets.items():
         ws = wb.create_sheet(sname)
         cols = [c for c in df.columns]
-        live, helpers = live_for(cols) if live_formulas else ({}, [])
+        live, helpers = live_for(cols, sname) if live_formulas else ({}, [])
+        cached.setdefault(sname, {})
         any_live = any_live or bool(live)
         headers = list(cols) + helpers
         ws.append(headers)
@@ -805,6 +848,7 @@ def write_workbook(system: Dict[str, Any], sheets: "OrderedDict[str, pd.DataFram
             for j, c in enumerate(cols):
                 if c in live:
                     line.append(live[c].replace("{r}", str(ri)))
+                    cached[sname][f"{get_column_letter(j + 1)}{ri}"] = row[c]
                 else:
                     line.append(xl_val(row[c]))
             if helpers:
@@ -819,11 +863,16 @@ def write_workbook(system: Dict[str, Any], sheets: "OrderedDict[str, pd.DataFram
     for t, sn in table_sheet.items():
         ws = wb.create_sheet(sn)
         T = tables[t]
-        ws.append([str(c) for c in T.columns])
+        spec = system.get("tables", {}).get(t, {})
+        pad = [None] * int(spec.get("col_offset", 0))
+        for _ in range(int(spec.get("header_row", 0))):
+            ws.append([])
+        hr = int(spec.get("header_row", 0)) + 1
+        ws.append(pad + [str(c) for c in T.columns])
         for row in T.itertuples(index=False, name=None):
-            ws.append([xl_val(v) for v in row])
-        for j in range(1, T.shape[1] + 1):
-            ws.cell(row=1, column=j).font = Font(bold=True)
+            ws.append(pad + [xl_val(v) for v in row])
+        for j in range(len(pad) + 1, len(pad) + T.shape[1] + 1):
+            ws.cell(row=hr, column=j).font = Font(bold=True)
 
     sm = wb.create_sheet("Run summary")
     sm.append(["System", system["name"]])
@@ -843,4 +892,7 @@ def write_workbook(system: Dict[str, Any], sheets: "OrderedDict[str, pd.DataFram
     sm.column_dimensions["B"].width = 90
     buf = io.BytesIO()
     wb.save(buf)
-    return buf.getvalue()
+    out = buf.getvalue()
+    if any(cached.values()):
+        out = inject_cached(out, list(sheets), cached)
+    return out

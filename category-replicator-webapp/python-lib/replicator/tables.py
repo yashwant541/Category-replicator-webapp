@@ -50,11 +50,14 @@ def _rows_to_df(rows: List[List[Any]]) -> Tuple[pd.DataFrame, int]:
     data = [[(r[j] if j < len(r) else None) for j in keep] for r in body
             if any(not is_blank(c) for c in r)]
     df = pd.DataFrame(data, columns=headers, dtype=object)
+    df.attrs["col_offset"] = int(min(keep)) if keep else 0
     return df, hr
 
 
-def read_workbook(file_bytes: bytes, filename: str) -> List[Dict[str, Any]]:
-    """-> [{sheet, header_row, df, n_formulas}] for every non-empty sheet."""
+def read_workbook(file_bytes: bytes, filename: str, report: Optional[List[Dict[str, Any]]] = None) -> List[Dict[str, Any]]:
+    """-> [{sheet, header_row, df, n_formulas}] for every non-empty sheet.
+
+    ``report`` (optional list) receives one {sheet, issue} entry per sheet that was skipped or looks wrong."""
     low = (filename or "").lower()
     out: List[Dict[str, Any]] = []
     if low.endswith((".csv", ".txt")):
@@ -72,16 +75,55 @@ def read_workbook(file_bytes: bytes, filename: str) -> List[Dict[str, Any]]:
             if not df.empty:
                 out.append({"sheet": name, "header_row": hr, "df": df, "n_formulas": 0})
         return out
-    wb_v = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True)
-    wb_f = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=False)
-    for name in wb_v.sheetnames:
-        rows = [list(r) for r in wb_v[name].iter_rows(values_only=True)]
+    # Read once in streaming mode.  Formulas come back as "=..." strings; only if the workbook has any do
+    # we read it a second time for the saved results (so plain data files are parsed just once).
+    wb_f = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=False, read_only=True)
+    raw: Dict[str, List[List[Any]]] = {}
+    for ws in wb_f.worksheets:
+        try:
+            ws.reset_dimensions()          # some generators write a wrong <dimension>; recompute it
+        except Exception:  # noqa: BLE001
+            pass
+        raw[ws.title] = [list(r) for r in ws.iter_rows(values_only=True)]
+    wb_f.close()
+
+    def has_formula(rows):
+        return any(isinstance(c, str) and c.startswith("=") for r in rows for c in r)
+    needs_values = {n for n, rows in raw.items() if has_formula(rows)}
+    vals: Dict[str, List[List[Any]]] = {}
+    if needs_values:
+        wb_v = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True, read_only=True)
+        for ws in wb_v.worksheets:
+            if ws.title in needs_values:
+                try:
+                    ws.reset_dimensions()
+                except Exception:  # noqa: BLE001
+                    pass
+                vals[ws.title] = [list(r) for r in ws.iter_rows(values_only=True)]
+        wb_v.close()
+    for name, frows in raw.items():
+        nf = unc = 0
+        if name in needs_values:
+            vrows = vals.get(name, [])
+            for fr, vr in zip(frows, vrows):
+                for c, v in zip(fr, vr):
+                    if isinstance(c, str) and c.startswith("="):
+                        nf += 1
+                        unc += v is None
+            rows = vrows
+        else:
+            rows = frows
         df, hr = _rows_to_df(rows)
         if df.empty:
+            if report is not None:
+                report.append({"sheet": name, "issue": (
+                    "skipped: %d formula cell(s) have no saved result, so there are no values to read - open the "
+                    "file in Excel, save it, and upload it again" % nf) if nf else "skipped: the sheet is empty"})
             continue
-        nf = sum(1 for r in wb_f[name].iter_rows()
-                 for c in r if isinstance(c.value, str) and c.value.startswith("="))
-        out.append({"sheet": name, "header_row": hr, "df": df, "n_formulas": nf})
+        if unc and report is not None:
+            report.append({"sheet": name, "issue": "%d of %d formula cell(s) have no saved result and read as blank "
+                           "- open the file in Excel and save it, then upload again" % (unc, nf)})
+        out.append({"sheet": name, "header_row": hr, "df": df, "n_formulas": nf, "col_offset": df.attrs.get("col_offset", 0)})
     return out
 
 
@@ -94,10 +136,10 @@ def guess_role(filename: str, sheet: str, n_formulas: int, is_first: bool) -> st
     return "input"
 
 
-def df_to_spec(df: pd.DataFrame, header_row: int = 0) -> Dict[str, Any]:
+def df_to_spec(df: pd.DataFrame, header_row: int = 0, col_offset: int = 0) -> Dict[str, Any]:
     recs = [{c: jsonable(v) for c, v in zip(df.columns, row)}
             for row in df.itertuples(index=False, name=None)]
-    return {"headers": [str(c) for c in df.columns], "records": recs, "header_row": int(header_row)}
+    return {"headers": [str(c) for c in df.columns], "records": recs, "header_row": int(header_row), "col_offset": int(col_offset)}
 
 
 def spec_to_df(spec: Dict[str, Any]) -> pd.DataFrame:

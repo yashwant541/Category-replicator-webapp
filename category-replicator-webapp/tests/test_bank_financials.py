@@ -77,3 +77,20 @@ def test_run_with_expected_output_compares_per_sheet(system):
                              expected_file=("out.xlsx", (B / "bank_financials_outputs.xlsx").read_bytes()))
     assert run["compare"]["aligned"] and run["compare"]["match"] == 1.0, run["compare"]
     assert run["sheets"] == {"Payroll_Output": 4, "Vendor_Output": 15, "Customer_Output": 41, "All_Enriched_Audit": 60}
+
+
+def test_live_formulas_no_self_reference_and_cached(system):
+    st, s = system
+    run = service.run_system(st, s["id"], [("src.xlsx", (B / "bank_financials_source_data.xlsx").read_bytes())],
+                             live_formulas=True)
+    data, _ = service.get_run_file(st, s["id"], run["run_id"])
+    f = openpyxl.load_workbook(io.BytesIO(data))
+    v = openpyxl.load_workbook(io.BytesIO(data), data_only=True)
+    ws, wv = f["Vendor_Output"], v["Vendor_Output"]
+    hdr = [c.value for c in ws[1]]
+    assert ws.cell(2, 1).value == "TXN00001"                         # raw column is a value, not =A2
+    j = hdr.index("Review_Flag") + 1
+    assert str(ws.cell(2, j).value).startswith("=IF(") and wv.cell(2, j).value in ("OK", "REVIEW")
+    j = hdr.index("GL_Code") + 1
+    assert "INDEX('Mapping'" in ws.cell(2, j).value and wv.cell(2, j).value == "GL-6200"
+    assert "Mapping" in f.sheetnames

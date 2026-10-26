@@ -69,3 +69,27 @@ def test_live_formulas_per_sheet_layout(system):
     hdr = [c.value for c in ws[1]]
     assert str(ws.cell(row=2, column=hdr.index("Capital_Required") + 1).value).startswith("=")
     assert {"Ratings", "FX"} <= set(wb.sheetnames)
+
+
+def test_formulas_written_into_output_cells(system):
+    """The generated workbook carries the formulas (as in the example), with saved results too."""
+    st, s = system
+    run = service.run_system(st, s["id"], [("new.xlsx", (D / "4_new_input_exposures.xlsx").read_bytes())],
+                             live_formulas=True)
+    data, _ = service.get_run_file(st, s["id"], run["run_id"])
+    f = openpyxl.load_workbook(io.BytesIO(data))
+    v = openpyxl.load_workbook(io.BytesIO(data), data_only=True)
+    ex = openpyxl.load_workbook(D / "5_new_expected_output.xlsx")
+    exv = openpyxl.load_workbook(D / "5_new_expected_output.xlsx", data_only=True)
+    n_formula = 0
+    for sh in ("Retail_EMEA", "Retail_APAC", "Corporate_Global", "SME_Global"):
+        hdr = [c.value for c in f[sh][1]]
+        base = 11
+        for j, col in enumerate(hdr[base:], start=base + 1):
+            got, want = f[sh].cell(2, j).value, ex[sh].cell(2, j).value
+            assert got == want, (sh, col, got, want)           # same formula text as the example sheet
+            n_formula += 1
+            gv, wv = v[sh].cell(2, j).value, exv[sh].cell(2, j).value
+            assert gv == wv or abs(float(gv) - float(wv)) < 1e-6, (sh, col, gv, wv)   # saved result present
+    assert n_formula >= 25
+    assert {"Ratings", "Products", "Countries", "FX"} <= set(f.sheetnames)

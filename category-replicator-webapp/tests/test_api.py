@@ -59,3 +59,39 @@ def test_full_flow():
     bad.save(bio)
     r = upload(c, f"/api/systems/{sid}/run", "bad.xlsx", bio.getvalue())
     assert not r["success"] and "expected input columns" in r["error"]
+
+
+def test_uncached_formula_mapping_sheet_is_reported():
+    c = client()
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Good"
+    ws.append(["k", "v"]); ws.append(["x", 1])
+    bad = wb.create_sheet("Calc")
+    bad.append(["k", "v"]); bad.append(["x", "=1+1"]); bad.append(["y", "=2*3"])
+    allf = wb.create_sheet("AllFormulas")
+    allf.append(['="k"', '="v"']); allf.append(['="x"', "=1"])
+    bio = io.BytesIO(); wb.save(bio)
+    did = c.post("/api/drafts").get_json()["draft_id"]
+    r = upload(c, f"/api/drafts/{did}/files", "map.xlsx", bio.getvalue(), hint="mapping")
+    assert r["success"]
+    issues = {i["sheet"]: i["issue"] for i in r["draft"]["files"][0]["issues"]}
+    assert "no saved result" in issues["Calc"] and "skipped" in issues["AllFormulas"]
+    assert [s["sheet"] for s in r["draft"]["files"][0]["sheets"]] == ["Good", "Calc"]
+
+
+def test_overlapping_uploads_do_not_lose_files():
+    import threading
+    c = client()
+    inp, mp, out, *_ = make_case(n=40)
+    did = c.post("/api/drafts").get_json()["draft_id"]
+    errs = []
+
+    def go(name, data, hint):
+        r = upload(c, f"/api/drafts/{did}/files", name, data, hint=hint)
+        if not r.get("success"):
+            errs.append(r)
+    ts = [threading.Thread(target=go, args=a) for a in (("in.xlsx", inp, "input"), ("map.xlsx", mp, "mapping"), ("out.xlsx", out, "output"))]
+    [t.start() for t in ts]; [t.join() for t in ts]
+    d = c.get(f"/api/drafts/{did}").get_json()["draft"]
+    assert not errs and sorted(f["name"] for f in d["files"]) == ["in.xlsx", "map.xlsx", "out.xlsx"]

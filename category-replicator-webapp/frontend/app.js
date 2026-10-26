@@ -122,16 +122,28 @@
     return B.did;
   }
 
-  async function uploadFiles(files, hint) {
-    if (!files.length) return;
-    const fd = new FormData();
-    Array.prototype.forEach.call(files, f => fd.append("files", f));
-    fd.append("hint", hint);
-    try {
-      const did = await ensureDraft();
-      B.draft = (await call("/api/drafts/" + did + "/files", { method: "POST", body: fd })).draft;
-      renderBuilder();
-    } catch (e) { toast(e.message, true); }
+  // Uploads run one at a time (a second drop while the first is still parsing used to race), with progress.
+  let UP_QUEUE = Promise.resolve();
+  let UP_BUSY = 0;
+  let UP_ERR = "";
+  function uploadFiles(files, hint) {
+    const list = Array.prototype.slice.call(files || []);
+    if (!list.length) return UP_QUEUE;
+    UP_BUSY += 1; UP_ERR = "";
+    const names = list.map(f => f.name).join(", ");
+    renderBuilder();
+    UP_QUEUE = UP_QUEUE.then(async () => {
+      try {
+        const fd = new FormData();
+        list.forEach(f => fd.append("files", f));
+        fd.append("hint", hint);
+        const did = await ensureDraft();
+        B.draft = (await call("/api/drafts/" + did + "/files", { method: "POST", body: fd })).draft;
+      } catch (e) {
+        UP_ERR = names + ": " + e.message; toast(UP_ERR, true);
+      } finally { UP_BUSY -= 1; renderBuilder(); }
+    });
+    return UP_QUEUE;
   }
 
   function dropZone(hint, title, sub) {
@@ -161,9 +173,10 @@
           h("span", { class: "spacer" }), sel]),
           h("div", { class: "chips" }, s.headers.slice(0, 18).map(x => h("span", { class: "chip", text: x })).concat(s.headers.length > 18 ? [h("span", { class: "chip", text: "+" + (s.headers.length - 18) })] : []))]);
       });
+      const issues = (f.issues || []).map(i => h("div", { class: "note", style: "margin:6px 12px", text: i.sheet + " — " + i.issue }));
       out.push(h("div", { class: "filebox" }, [h("div", { class: "fh" }, [h("span", { text: f.name }),
         h("button", { class: "icon-btn", title: "Remove file", text: "✕", onclick: async () => {
-          B.draft = (await call("/api/drafts/" + B.did + "/files/" + f.fid, { method: "DELETE" })).draft; renderBuilder(); } })]), ...rows]));
+          B.draft = (await call("/api/drafts/" + B.did + "/files/" + f.fid, { method: "DELETE" })).draft; renderBuilder(); } })]), ...issues, ...rows]));
     });
     return out;
   }
@@ -197,8 +210,10 @@
       root.appendChild(h("div", { class: "grid g3" }, [
         h("div", { class: "card" }, [dropZone("input", "Input file(s)", "The raw data the output is built from")]),
         h("div", { class: "card" }, [dropZone("mapping", "Mapping file(s)", "Lookup / rate / reference tables")]),
-        h("div", { class: "card" }, [dropZone("output", "Expected output", "The finished file (can have several sheets)")])]));
+        h("div", { class: "card" }, [dropZone("output", "Expected output", "The finished file: several sheets allowed, including the mapping sheets its formulas use (detected automatically)")])]));
       const boxes = fileBoxes();
+      if (UP_BUSY) root.appendChild(h("div", { class: "note good" }, [h("span", { class: "spin" }), "Uploading and reading " + UP_BUSY + " file group(s)… large workbooks can take a little while. You can keep adding files; they are processed in order."]));
+      if (UP_ERR) root.appendChild(h("div", { class: "note err", text: "Upload failed — " + UP_ERR + " (drop the file again to retry)" }));
       root.appendChild(h("div", { class: "card" }, [h("h2", { text: "Uploaded sheets" }),
         h("div", { class: "muted small", text: "Every sheet is classified automatically — change a sheet's role if the guess is wrong. Several input sheets with the same columns are stacked; a workbook can hold input and mapping sheets together." }),
         ...(boxes.length ? boxes : [h("div", { class: "empty", text: "Nothing uploaded yet" })])]));
@@ -211,7 +226,7 @@
       if (col) root.appendChild(col);
       root.appendChild(h("div", { class: "row" }, [h("button", { class: "btn ghost", text: "← Back", onclick: () => { B.step = 1; renderBuilder(); } }), h("span", { class: "spacer" }),
         h("span", { class: "muted small", text: roles.input + " input · " + roles.mapping + " mapping · " + roles.output + " output sheet(s)" }),
-        h("button", { class: "btn", text: "Learn the rules →", ...(ready ? {} : { disabled: true }), onclick: learnNow })]));
+        h("button", { class: "btn", text: "Learn the rules →", ...(ready && !UP_BUSY ? {} : { disabled: true }), onclick: learnNow })]));
       return;
     }
 
@@ -361,7 +376,7 @@
   /* ---------------------------------------------------------------- run tab */
   function tabRun(body) {
     const s = SYS;
-    const files = { in: [], map: [], exp: [] }; let live = false;
+    const files = { in: [], map: [], exp: [] }; let live = true;
     function zone(key, title, sub, multiple) {
       const list = h("div", { class: "small muted", style: "margin-top:6px" });
       const refresh = () => { list.textContent = files[key].map(f => f.name).join(", "); };
@@ -391,7 +406,7 @@
         zone("map", "Updated mappings (optional)", "Replace stored mapping tables for this run", true),
         zone("exp", "Expected output (optional)", "Compare the result to a known answer", false)]),
       h("div", { class: "row", style: "margin-top:14px" }, [
-        h("label", { class: "small" }, [h("input", { type: "checkbox", onchange: e => { live = e.target.checked; } }), " Write live Excel formulas (beta) — otherwise values"]),
+        h("label", { class: "small" }, [h("input", { type: "checkbox", checked: true, onchange: e => { live = e.target.checked; } }), " Write the formulas into the output cells (untick for plain values)"]),
         h("span", { class: "spacer" }), btn])]));
     body.appendChild(out);
     if (LAST_RUN && LAST_RUN.system === s.id) showRun(out, LAST_RUN);
