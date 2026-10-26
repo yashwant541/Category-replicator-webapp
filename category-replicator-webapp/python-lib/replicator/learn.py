@@ -93,6 +93,26 @@ def align(X: pd.DataFrame, Y: pd.DataFrame) -> Tuple[pd.DataFrame, np.ndarray, D
             mask[list(set(idx))] = True
             info.update(method="key", key=xc if xc == yc else [f"{a} = {b}" for a, b in zip(xc, yc)])
             return X.iloc[idx].reset_index(drop=True), mask, info
+    if common:                                  # no ID needed: match whole rows (all shared columns together)
+        xs_cols, ys_cols = [c for c, _ in common], [d for _, d in common]
+        pool: Dict[Tuple, List[int]] = {}
+        for i, sig in enumerate(zip(*[X[c].map(nk) for c in xs_cols])):
+            pool.setdefault(sig, []).append(i)
+        used: Dict[Tuple, int] = {}
+        idx, ok = [], True
+        for sig in zip(*[Y[d].map(nk) for d in ys_cols]):
+            lst = pool.get(sig)
+            if not lst:
+                ok = False
+                break
+            n = used.get(sig, 0)
+            idx.append(lst[min(n, len(lst) - 1)])
+            used[sig] = n + 1
+        if ok and idx:
+            mask = np.zeros(len(X), bool)
+            mask[idx] = True
+            info.update(method="whole rows", key=xs_cols)
+            return X.iloc[idx].reset_index(drop=True), mask, info
     if len(X) == len(Y):
         info.update(method="row order", key=None,
                     warning="No identifying key found; assumed the output is in the same row order.")

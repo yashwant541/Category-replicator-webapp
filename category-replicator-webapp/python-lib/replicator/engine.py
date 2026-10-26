@@ -455,8 +455,8 @@ def route_sheets(X: pd.DataFrame, masks: Dict[str, np.ndarray], parts: List[pd.D
     off = {"enabled": False, "mode": "column", "column": "", "map": {}, "new_values": "create", "sheets": [], "rest_sheet": ""}
     if len(masks) < 2:
         return off, None
-    vals = list(masks.values())
-    disjoint = not any((a & b).any() for i, a in enumerate(vals) for b in vals[i + 1:])
+    vals = [m for m in masks.values() if m is not None]
+    disjoint = len(vals) == len(masks) and not any((a & b).any() for i, a in enumerate(vals) for b in vals[i + 1:])
     if disjoint:
         sp, _ = detect_split(pd.concat(parts, ignore_index=True), pd.Series(labels))
         if sp.get("enabled") and sp.get("mode") == "column":
@@ -464,7 +464,7 @@ def route_sheets(X: pd.DataFrame, masks: Dict[str, np.ndarray], parts: List[pd.D
     sp = dict(off, enabled=True, mode="custom")
     miss = []
     for name, m in masks.items():
-        conds: Optional[List[Dict[str, Any]]] = [] if m.all() else _route_conditions(X, m, name)
+        conds: Optional[List[Dict[str, Any]]] = [] if (m is None or m.all()) else _route_conditions(X, m, name)
         if conds is None:
             miss.append(name)
             conds = []
@@ -548,28 +548,33 @@ def build_system(entries: List[Dict[str, Any]], options: Dict[str, Any]) -> Dict
             warnings.append(f"Sheet '{e['sheet']}': no formula in the sample for {', '.join(empty)} - these columns stay empty.")
         hr = int(e.get("header_row", 0))
         in_cols = [c["name"] for c in cols if c["kind"] == "input"]
-        if not in_cols:
-            raise ValueError(f"Sheet '{e['sheet']}': none of its columns match a column of the input.")
         try:
+            if not in_cols:
+                raise ValueError("none of its columns match a column of the input")
             Xs, m, _ = align(X, df[in_cols])
+            masks[e["sheet"]] = m
+            xs_parts.append(Xs)
+            labels += [e["sheet"]] * len(Xs)
         except ValueError as exc:
-            raise ValueError(f"Sheet '{e['sheet']}': {exc}")
-        masks[e["sheet"]] = m
-        xs_parts.append(Xs)
-        labels += [e["sheet"]] * len(Xs)
+            masks[e["sheet"]] = None            # unknown: the sheet gets every input row until its filter is set
+            why = str(exc) if not in_cols else f"{len(X)} input rows vs {len(df)} rows in the sample; no identifying column to match them"
+            warnings.append(f"Sheet '{e['sheet']}': could not tell which input rows it holds ({why}). It will receive "
+                            "every input row - set its filter under Filters & outputs.")
         sheets.append({"name": e["sheet"], "origin": {"row": hr, "col": int(min(c["col"] for c in cols))},
                        "columns": cols, "params": _param_cells(e, cols, hr), "sample_rows": int(len(df))})
 
     # ---- filters: the input filter + which rows each sheet holds (the user can edit both)
     flt: Dict[str, Any] = {"pre": [], "split": {"enabled": False, "mode": "column", "column": "", "map": {},
                                                 "new_values": "create", "sheets": [], "rest_sheet": ""}}
-    included = np.zeros(len(X), bool)
-    for m in masks.values():
-        included |= m
-    pre, pre_warn = detect_pre_filter(X, included)
-    flt["pre"] = pre
-    if pre_warn:
-        warnings.append(pre_warn)
+    known = [m for m in masks.values() if m is not None]
+    if len(known) == len(masks):
+        included = np.zeros(len(X), bool)
+        for m in known:
+            included |= m
+        pre, pre_warn = detect_pre_filter(X, included)
+        flt["pre"] = pre
+        if pre_warn:
+            warnings.append(pre_warn)
     sp_opt = options.get("split") or {}
     mode = sp_opt.get("mode", "auto")
     if mode == "none":

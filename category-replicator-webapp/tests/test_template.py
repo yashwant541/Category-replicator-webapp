@@ -267,3 +267,67 @@ def test_users_toggle_sample_and_headerless_toggle_sheet():
     assert len(s["df"]) == 2 and s["grid"][0] == ["Include Tax", "Yes"]
     t = engine.toggles_from_tables({"Toggle": engine.df_to_spec(s["df"], s["header_row"], s["col_offset"], s["grid"])})
     assert [(x["name"], x["value"], x["cell"]) for x in t] == [("Include Tax", "Yes", "B1"), ("Round Up", "No", "B2")]
+
+
+# ---------------------------------------------------- a sheet that cannot be lined up with the input is not fatal
+def test_sheet_with_more_rows_than_the_input_gets_all_rows_and_a_warning():
+    """Input has 3 rows, the sample sheet 25 (e.g. a sheet that repeats/explodes rows): must still build."""
+    inp = small_book([(1, "x", 10), (2, "y", 20), (3, "x", 30)])
+    out = openpyxl.Workbook()
+    o = out.active
+    o.title = "ABC"
+    o.append(["Grp", "Amt", "Double"])
+    for i in range(2, 27):                                   # 25 rows, no ID column to match them with the input
+        o.append(["x", 10 * i, f"=B{i}*2"])
+    st, s = make([("i.xlsx", inp, "input"), ("o.xlsx", b(out), "output")])
+    assert any("could not tell which input rows" in w for w in s["warnings"])
+    run, wb = output_book(st, s, small_book([(7, "x", 5), (8, "y", 6)]))
+    assert run["sheets"] == {"ABC": 2} and wb["ABC"]["C2"].value == "=B2*2"
+
+
+def test_one_unmatchable_sheet_does_not_stop_the_other_sheets_filters():
+    rows = [(1, "x", 10), (2, "y", 20), (3, "x", 30), (4, "y", 5)]
+    out = openpyxl.Workbook()
+    out.remove(out.active)
+    for g in ("x", "y"):
+        w = out.create_sheet("Grp_" + g)
+        w.append(["ID", "Grp", "Amt"])
+        for r in rows:
+            if r[1] == g:
+                w.append(list(r))
+    w = out.create_sheet("Summary")                          # 12 rows, no way to match them
+    w.append(["Grp", "Amt"])
+    for i in range(12):
+        w.append(["x", i])
+    st, s = make([("i.xlsx", small_book(rows), "input"), ("o.xlsx", b(out), "output")])
+    conds = {x["name"]: x["conditions"] for x in s["filters"]["split"]["sheets"]}
+    assert conds["Summary"] == [] and conds["Grp_x"] and conds["Grp_y"]            # the others still got real filters
+    run, wb = output_book(st, s, small_book(rows))
+    assert run["sheets"] == {"Grp_x": 2, "Grp_y": 2, "Summary": 4}
+
+
+def test_sheet_with_no_input_columns_is_not_fatal():
+    out = openpyxl.Workbook()
+    o = out.active
+    o.title = "OnlyFormulas"
+    o.append(["Metric", "Value"])
+    o.append(["Total rows", 4])
+    o.append(["Total amount", 65])
+    st, s = make([("i.xlsx", small_book(DATA), "input"), ("o.xlsx", b(out), "output")])
+    assert any("none of its columns match" in w for w in s["warnings"])
+
+
+def test_no_id_column_needed_to_work_out_the_sheet_filters():
+    rows = [("x", 10), ("y", 20), ("x", 30), ("y", 5), ("x", 40)]
+    inp = small_book(rows, ("Grp", "Amt"))
+    out = openpyxl.Workbook()
+    out.remove(out.active)
+    for g in ("x", "y"):
+        w = out.create_sheet("Only_" + g)
+        w.append(["Grp", "Amt", "Tax"])
+        for i, r in enumerate([r for r in rows if r[0] == g], start=2):
+            w.append([r[0], r[1], f"=B{i}*0.2"])
+    st, s = make([("i.xlsx", inp, "input"), ("o.xlsx", b(out), "output")])
+    assert s["filters"]["split"]["column"] == "Grp" and not any("could not tell" in w for w in s["warnings"])
+    run, wb = output_book(st, s, small_book([("y", 1), ("x", 2), ("x", 3)], ("Grp", "Amt")))
+    assert run["sheets"] == {"Only_x": 2, "Only_y": 1} and wb["Only_x"]["C3"].value == "=B3*0.2"
