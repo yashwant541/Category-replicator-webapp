@@ -64,8 +64,9 @@ def test_new_input_reproduces_the_expected_workbook_cell_by_cell(dummy):
 def test_each_sheet_keeps_its_own_columns_and_formulas(dummy):
     st, s = dummy
     by = {d["name"]: d for d in s["sheets"]}
-    assert by["Retail_EMEA"]["columns"][-1] == {"name": "Expected_Loss", "col": 15, "kind": "formula",
-                                                 "raw": "=ROUND(M2*N2*O2,2)", "sample_row": 2}
+    last = by["Retail_EMEA"]["columns"][-1]
+    assert {k: last[k] for k in ("name", "col", "kind", "raw", "sample_row")} == {
+        "name": "Expected_Loss", "col": 15, "kind": "formula", "raw": "=ROUND(M2*N2*O2,2)", "sample_row": 2}
     assert by["SME_Global"]["columns"][-1]["name"] == "Label"
     raw = {d["name"]: next(c["raw"] for c in d["columns"] if c["name"] == "RWA")
            for d in s["sheets"] if d["name"] != "Retail_EMEA"}

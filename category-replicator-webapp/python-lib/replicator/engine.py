@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import datetime as dt
 import io
+import math
 import re
 import uuid
 import zipfile
@@ -536,13 +537,14 @@ def build_system(entries: List[Dict[str, Any]], options: Dict[str, Any]) -> Dict
         idx = e.get("col_idx") or list(range(e.get("col_offset", 0), e.get("col_offset", 0) + df.shape[1]))
         cols: List[Dict[str, Any]] = []
         for j, c in enumerate(df.columns):
+            st = _sample_type(df.iloc[:, j])
             c = str(c)
             if c in fc:
-                cols.append({"name": c, "col": int(idx[j]), "kind": "formula", "raw": fc[c]["raw"], "sample_row": int(fc[c]["row"])})
+                cols.append({"name": c, "col": int(idx[j]), "kind": "formula", "raw": fc[c]["raw"], "sample_row": int(fc[c]["row"]), "sample_type": st})
             elif nk(c) in in_names:
-                cols.append({"name": c, "col": int(idx[j]), "kind": "input", "source": in_names[nk(c)]})
+                cols.append({"name": c, "col": int(idx[j]), "kind": "input", "source": in_names[nk(c)], "sample_type": st})
             else:
-                cols.append({"name": c, "col": int(idx[j]), "kind": "empty"})
+                cols.append({"name": c, "col": int(idx[j]), "kind": "empty", "sample_type": st})
         empty = [c["name"] for c in cols if c["kind"] == "empty"]
         if empty:
             warnings.append(f"Sheet '{e['sheet']}': no formula in the sample for {', '.join(empty)} - these columns stay empty.")
@@ -705,20 +707,157 @@ def apply_formula_edits(system: Dict[str, Any], edits: List[Dict[str, Any]]) -> 
     return n
 
 
+# ================================================================== locked data types
+DTYPES = ("auto", "text", "integer", "decimal", "date")
+_EXCEL_EPOCH = dt.datetime(1899, 12, 30)
+_DATE_FMT = re.compile(r"^[A-Za-z0-9 /\-\.:,]{1,30}$")
+_TYPE_LABEL = {"text": "text", "integer": "a whole number", "decimal": "a decimal number", "date": "a date"}
+
+
+def _to_float(v: Any) -> Optional[float]:
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, (int, float, np.integer, np.floating)):
+        x = float(v)
+    else:
+        try:
+            x = float(str(v).strip().replace(",", "").replace(" ", ""))
+        except ValueError:
+            return None
+    return x if math.isfinite(x) else None
+
+
+def _to_date(v: Any, dayfirst: bool = False) -> Optional[dt.datetime]:
+    if isinstance(v, pd.Timestamp):
+        return None if pd.isna(v) else v.to_pydatetime()
+    if isinstance(v, dt.datetime):
+        return v
+    if isinstance(v, dt.date):
+        return dt.datetime(v.year, v.month, v.day)
+    x = _to_float(v) if not isinstance(v, str) else None
+    if x is not None:                                   # an Excel serial number (1954 .. 2118)
+        return _EXCEL_EPOCH + dt.timedelta(days=x) if 20000 < x < 80000 else None
+    t = pd.to_datetime(str(v).strip(), errors="coerce", dayfirst=dayfirst)
+    return None if pd.isna(t) else t.to_pydatetime()
+
+
+def coerce_value(v: Any, spec: Dict[str, Any]) -> Tuple[Any, bool]:
+    """Force one value into the locked type -> (value, ok).  Blank stays blank; unreadable -> (None, False)."""
+    if is_blank(v):
+        return None, True
+    t = spec["type"]
+    if t == "text":
+        return disp(v), True
+    if t == "date":
+        d = _to_date(v, bool(spec.get("dayfirst")))
+        return (d, True) if d is not None else (None, False)
+    x = _to_float(v)
+    if x is None:
+        return None, False
+    if t == "integer":
+        return int(math.copysign(math.floor(abs(x) + 0.5), x)), True
+    f = 10.0 ** int(spec.get("decimals", 2))
+    return float(math.copysign(math.floor(round(abs(x) * f, 6) + 0.5), x) / f), True
+
+
+def number_format_for(spec: Optional[Dict[str, Any]], kind: str) -> Optional[str]:
+    """Excel number format of a locked column (a formula cell is never turned into text)."""
+    if not spec:
+        return None
+    t = spec["type"]
+    if t == "text":
+        return "@" if kind != "formula" else None
+    if t == "integer":
+        return "0"
+    if t == "decimal":
+        d = int(spec.get("decimals", 2))
+        return "0" + ("." + "0" * d if d else "")
+    if t == "date":
+        return spec.get("format") or "yyyy-mm-dd"
+    return None
+
+
+def _sample_type(series: pd.Series) -> str:
+    vals = [v for v in series if not is_blank(v)]
+    if not vals:
+        return ""
+    if all(isinstance(v, (dt.datetime, dt.date, pd.Timestamp)) for v in vals):
+        return "date"
+    if all(isinstance(v, (int, float, np.integer, np.floating)) and not isinstance(v, bool) for v in vals):
+        return "integer" if all(float(v).is_integer() for v in vals) else "decimal"
+    return "text"
+
+
+def apply_dtype_edits(system: Dict[str, Any], edits: List[Dict[str, Any]]) -> int:
+    """edits: [{sheet, column, type, decimals?, format?}] - 'auto' removes the lock."""
+    by = {d["name"]: d for d in system["sheets"]}
+    errors, plan = [], []
+    for e in edits:
+        d = by.get(e.get("sheet"))
+        c = next((x for x in d["columns"] if x["name"] == e.get("column")), None) if d else None
+        t = e.get("type", "auto")
+        if c is None:
+            errors.append("%s / %s: no such column" % (e.get("sheet"), e.get("column")))
+        elif t not in DTYPES:
+            errors.append("%s / %s: unknown type '%s' (use %s)" % (d["name"], c["name"], t, ", ".join(DTYPES)))
+        else:
+            spec: Optional[Dict[str, Any]] = None
+            if t != "auto":
+                spec = {"type": t}
+                if t == "decimal":
+                    try:
+                        spec["decimals"] = int(e.get("decimals", 2))
+                        assert 0 <= spec["decimals"] <= 10
+                    except (TypeError, ValueError, AssertionError):
+                        errors.append("%s / %s: decimals must be a whole number from 0 to 10" % (d["name"], c["name"]))
+                        continue
+                if t == "date":
+                    f = (e.get("format") or "yyyy-mm-dd").strip()
+                    if not _DATE_FMT.match(f):
+                        errors.append("%s / %s: date format may only use letters, digits and - / . : , space" % (d["name"], c["name"]))
+                        continue
+                    spec["format"] = f
+                    if e.get("dayfirst"):
+                        spec["dayfirst"] = True          # 04/05/2026 means 4 May, not April 5
+            plan.append((c, spec))
+    if errors:
+        raise ValueError("; ".join(errors[:5]) + (" ..." if len(errors) > 5 else ""))
+    for c, spec in plan:
+        if spec:
+            c["dtype"] = spec
+        else:
+            c.pop("dtype", None)
+    return len(plan)
+
+
 # ======================================================================= applying it
-def _sheet_frame(d: Dict[str, Any], rows: pd.DataFrame) -> pd.DataFrame:
-    """The sheet as it will be written: pasted input values + the sample's formulas filled down (nothing else)."""
+def _sheet_frame(d: Dict[str, Any], rows: pd.DataFrame) -> Tuple[pd.DataFrame, List[str]]:
+    """The sheet as it will be written: pasted input values (forced into any locked type) + the sample's formulas
+    filled down (nothing else).  Also returns what could not be read as the locked type."""
     first = d["origin"]["row"] + 2
     data: "OrderedDict[str, List[Any]]" = OrderedDict()
     n = len(rows)
+    issues: List[str] = []
     for c in d["columns"]:
         if c["kind"] == "input":
-            data[c["name"]] = list(rows[c["source"]]) if c["source"] in rows.columns else [None] * n
+            vals = list(rows[c["source"]]) if c["source"] in rows.columns else [None] * n
+            if c.get("dtype"):
+                out, bad = [], []
+                for v in vals:
+                    x, ok = coerce_value(v, c["dtype"])
+                    out.append(x)
+                    if not ok:
+                        bad.append(v)
+                vals = out
+                if bad:
+                    issues.append("Sheet '%s', column '%s': %d value(s) could not be read as %s and were left empty (e.g. %s)."
+                                  % (d["name"], c["name"], len(bad), _TYPE_LABEL[c["dtype"]["type"]], ", ".join(map(lambda x: repr(disp(x)), bad[:3]))))
+            data[c["name"]] = vals
         elif c["kind"] == "formula":
             data[c["name"]] = [shift_formula(c["raw"], c["sample_row"], first + i) for i in range(n)]
         else:
             data[c["name"]] = [None] * n
-    return pd.DataFrame(data, columns=[c["name"] for c in d["columns"]], dtype=object)
+    return pd.DataFrame(data, columns=[c["name"] for c in d["columns"]], dtype=object), issues
 
 
 def apply_system(system: Dict[str, Any], df_in: pd.DataFrame,
@@ -741,7 +880,9 @@ def apply_system(system: Dict[str, Any], df_in: pd.DataFrame,
         if d is None:
             d = system["sheets"][0]
             notes.append(f"Sheet '{name}' is new: laid out like '{d['name']}'.")
-        sheets[name] = {"df": _sheet_frame(d, rdf.reset_index(drop=True)), "def": d}
+        fr, issues = _sheet_frame(d, rdf.reset_index(drop=True))
+        notes += issues
+        sheets[name] = {"df": fr, "def": d}
     return {"sheets": sheets, "notes": notes, "toggles": toggles_now, "input_rows": n_in,
             "rows": int(sum(len(v["df"]) for v in sheets.values()))}
 
@@ -795,7 +936,10 @@ def write_workbook(system: Dict[str, Any], sheets: "OrderedDict[str, Dict[str, A
             for c, v in zip(d["columns"], row):
                 if v is not None and not (isinstance(v, float) and np.isnan(v)):
                     # a formula is written as a formula; pasted input text starting with "=" stays text
-                    ws.cell(row=ri, column=c["col"] + 1, value=v if c["kind"] == "formula" else xl_val(v))
+                    cell = ws.cell(row=ri, column=c["col"] + 1, value=v if c["kind"] == "formula" else xl_val(v))
+                    fmt = number_format_for(c.get("dtype"), c["kind"])
+                    if fmt:                                            # the locked type of this column
+                        cell.number_format = fmt
         for p in d.get("params", []):                          # parameter cell(s) the formulas point at ($G$1 ...)
             if p.get("value") is not None:
                 ws.cell(row=p["row"] + 1, column=p["col"] + 1, value=xl_val(p["value"]))

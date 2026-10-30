@@ -30,7 +30,9 @@ restart the backend.
 2. **Template** tab shows every sheet: cell, column, "input" (pasted) or "formula" (the stored text).
 3. **Formulas** tab: every derived cell (sheet, address, formula, what the next row reads). Edit a formula or a reference, use
    find & replace across sheets, add a formula to an empty column, then save. The original stays one click away (↺).
-4. **Run on new data** → drop new input → download the `.xlsx`.
+4. **Data types** tab: lock the type of chosen output columns (text / whole number / decimal / date). Every run forces those columns into
+   that type and sets the Excel cell format; unreadable values are left empty and reported in the run notes.
+5. **Run on new data** → drop new input → download the `.xlsx`.
 
 Local preview: `python dev/serve.py` → http://localhost:5181. Sample data: `dev/sample_data/` (`python dev/make_dummy_data.py`).
 Tests: `cd tests && python -m pytest -q`.

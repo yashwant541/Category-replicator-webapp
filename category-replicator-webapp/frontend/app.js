@@ -275,11 +275,11 @@
         h("button", { class: "btn ghost small", text: "Rebuild", onclick: relearn }),
         h("button", { class: "btn ghost danger small", text: "Delete", onclick: async () => { if (!confirm("Delete system '" + s.name + "'?")) return;
           await call("/api/systems/" + s.id, { method: "DELETE" }); SYS = null; location.hash = "#/"; } })])]));
-    const tabs = [["rules", "Template"], ["formulas", "Formulas"], ["run", "Run on new data"], ["filters", "Filters & outputs"], ["maps", "Mappings"], ["history", "History"]];
+    const tabs = [["rules", "Template"], ["formulas", "Formulas"], ["types", "Data types"], ["run", "Run on new data"], ["filters", "Filters & outputs"], ["maps", "Mappings"], ["history", "History"]];
     root.appendChild(h("div", { class: "tabs" }, tabs.map(([k, l]) => h("a", { class: "tab" + (tab === k ? " on" : ""), href: "#/s/" + s.id + "/" + k, text: l }))));
     const body = h("div", {});
     root.appendChild(body);
-    ({ rules: tabRules, formulas: tabFormulas, run: tabRun, filters: tabFilters, maps: tabMaps, history: tabHistory }[tab] || tabRules)(body);
+    ({ rules: tabRules, formulas: tabFormulas, types: tabTypes, run: tabRun, filters: tabFilters, maps: tabMaps, history: tabHistory }[tab] || tabRules)(body);
   }
 
   async function relearn() {
@@ -312,7 +312,7 @@
         h("div", { class: "scroll", style: "margin-top:10px;max-height:340px" }, [h("table", { class: "t" }, [
           h("thead", {}, [h("tr", {}, ["Cell", "Column", "What goes there"].map(x => h("th", { text: x })))]),
           h("tbody", {}, d.columns.map(c => h("tr", {}, [
-            h("td", { class: "mono", text: col(c.col) + (d.origin.row + 1) }), h("td", {}, [h("b", { text: c.name })]),
+            h("td", { class: "mono", text: col(c.col) + (d.origin.row + 1) }), h("td", {}, [h("b", { text: c.name }), c.dtype ? h("span", { class: "pill manual", style: "margin-left:6px", text: "locked: " + c.dtype.type }) : null]),
             c.kind === "input" ? h("td", {}, [h("span", { class: "pill acc", text: "input" }), " pasted from the input column ", h("b", { text: c.source })])
               : c.kind === "formula" ? h("td", {}, [h("span", { class: "pill ok", text: "formula" }), c.orig !== undefined ? h("span", { class: "pill manual", text: "edited", style: "margin-left:4px" }) : null, " ", h("span", { class: "desc", text: c.raw })])
               : h("td", {}, [h("span", { class: "pill warn", text: "empty" }), " no formula in the sample"])])))])]),
@@ -420,6 +420,88 @@
               h("td", { style: "min-width:340px" }, [r.inp]), h("td", {}, [r.prev]), h("td", { style: "white-space:nowrap" }, [r.badge, " ", r.undo])]);
             refresh(r);
             return tr;
+          }))])])]));
+    });
+    update();
+  }
+
+  /* ------------------------------------------------------------- data types tab */
+  const TYPE_LABEL = { auto: "Auto (leave as it comes)", text: "Text", integer: "Whole number", decimal: "Decimal number", date: "Date" };
+
+  function tabTypes(body) {
+    const s = SYS;
+    const edits = {};                                    // "sheet\u0001column" -> {type, decimals, format, dayfirst}
+    const K = (sh, c) => sh + "\u0001" + c;
+    const rows = [];
+    s.sheets.forEach(d => d.columns.forEach(c => rows.push({ d, c, key: K(d.name, c.name), els: {} })));
+    const saved = r => r.c.dtype ? Object.assign({ type: "auto" }, r.c.dtype) : { type: "auto" };
+    const cur = r => (r.key in edits) ? edits[r.key] : saved(r);
+    const eq = (a, b) => a.type === b.type && (a.type !== "decimal" || (+a.decimals || 2) === (+b.decimals || 2)) &&
+      (a.type !== "date" || ((a.format || "yyyy-mm-dd") === (b.format || "yyyy-mm-dd") && !!a.dayfirst === !!b.dayfirst));
+    const allSheets = h("input", { type: "checkbox", checked: true });
+    const pendingLbl = h("span", { class: "muted small" });
+    const saveBtn = h("button", { class: "btn", text: "Save data types", disabled: true, onclick: save });
+    const discardBtn = h("button", { class: "btn ghost", text: "Discard", disabled: true, onclick: () => { Object.keys(edits).forEach(k => delete edits[k]); rows.forEach(draw); update(); } });
+    const err = h("div", { class: "note err", style: "display:none" });
+
+    function draw(r) {
+      const v = cur(r), changed = r.key in edits;
+      r.els.sel.value = v.type;
+      r.els.dec.style.display = v.type === "decimal" ? "" : "none"; r.els.dec.value = v.decimals != null ? v.decimals : 2;
+      r.els.fmt.style.display = v.type === "date" ? "" : "none"; r.els.fmt.value = v.format || "yyyy-mm-dd";
+      r.els.dayLbl.style.display = v.type === "date" ? "" : "none"; r.els.day.checked = !!v.dayfirst;
+      r.els.note.style.display = (v.type !== "auto" && r.c.kind === "formula") ? "" : "none";
+      r.els.row.style.background = changed ? "var(--warn-soft)" : "";
+    }
+    function set(r, v) {
+      const targets = allSheets.checked ? rows.filter(x => x.c.name === r.c.name) : [r];
+      targets.forEach(t => { if (eq(v, saved(t))) delete edits[t.key]; else edits[t.key] = Object.assign({}, v); draw(t); });
+      update();
+    }
+    function read(r) {
+      const t = r.els.sel.value, v = { type: t };
+      if (t === "decimal") v.decimals = parseInt(r.els.dec.value, 10);
+      if (t === "date") { v.format = r.els.fmt.value.trim() || "yyyy-mm-dd"; v.dayfirst = r.els.day.checked; }
+      return v;
+    }
+    function update() {
+      const n = Object.keys(edits).length;
+      saveBtn.disabled = !n; discardBtn.disabled = !n;
+      pendingLbl.textContent = n ? n + " unsaved change(s)" : "No unsaved changes";
+    }
+    async function save() {
+      const payload = Object.keys(edits).map(k => { const [sheet, column] = k.split("\u0001"); return Object.assign({ sheet, column }, edits[k]); });
+      saveBtn.disabled = true;
+      try { SYS = (await call("/api/systems/" + SYS.id, { method: "PUT", json: { dtypes: payload } })).system; toast("Data types saved"); renderSystem("types"); }
+      catch (e) { toast(e.message, true); saveBtn.disabled = false; err.textContent = e.message; err.style.display = ""; }
+    }
+
+    body.appendChild(h("div", { class: "card" }, [
+      h("div", { class: "row" }, [h("h2", { text: "Data types", style: "margin:0" }), h("span", { class: "spacer" }), pendingLbl, discardBtn, saveBtn]),
+      h("div", { class: "muted small", text: "Lock the type of chosen output columns. Every run then forces those columns into that type — whatever the new input looks like (an ID that arrives as a number, a date that arrives as text) — and sets the Excel cell format. Values that cannot be read as the locked type are left empty and reported in the run notes. Columns left on Auto are pasted exactly as they come. For a formula column only the Excel number format is set: Excel decides what the formula returns." }),
+      h("label", { class: "small", style: "display:block;margin-top:10px" }, [allSheets, " Apply a change to the same-named column on every sheet"]),
+      err]));
+
+    s.sheets.forEach(d => {
+      const mine = rows.filter(r => r.d === d);
+      body.appendChild(h("div", { class: "card" }, [h("h3", { text: d.name, style: "margin:0 0 8px" }),
+        h("div", { class: "scroll", style: "max-height:none" }, [h("table", { class: "t" }, [
+          h("thead", {}, [h("tr", {}, ["Column", "Is", "In your sample", "Locked type", "Options"].map(x => h("th", { text: x })))]),
+          h("tbody", {}, mine.map(r => {
+            const e = r.els;
+            e.sel = h("select", { class: "inl", onchange: () => set(r, Object.assign({}, read(r), r.els.sel.value === "date" ? {} : {})) },
+              Object.keys(TYPE_LABEL).map(k => h("option", { value: k, text: TYPE_LABEL[k] })));
+            e.dec = h("input", { type: "number", class: "inl", min: 0, max: 10, style: "width:70px", title: "decimals", onchange: () => set(r, read(r)) });
+            e.fmt = h("input", { type: "text", class: "inl mono", style: "width:130px", title: "Excel date format, e.g. yyyy-mm-dd or dd-mmm-yyyy", onchange: () => set(r, read(r)) });
+            e.day = h("input", { type: "checkbox", onchange: () => set(r, read(r)) });
+            e.dayLbl = h("label", { class: "small", title: "04/05/2026 means 4 May" }, [e.day, " day first"]);
+            e.note = h("span", { class: "muted small", text: "display format only (formula stays a formula)" });
+            e.row = h("tr", {}, [h("td", {}, [h("b", { text: r.c.name })]),
+              h("td", {}, [h("span", { class: "pill " + (r.c.kind === "formula" ? "ok" : (r.c.kind === "input" ? "acc" : "warn")), text: r.c.kind })]),
+              h("td", {}, [r.c.sample_type ? h("span", { class: "pill", text: r.c.sample_type }) : h("span", { class: "muted", text: "—" })]),
+              h("td", {}, [e.sel]), h("td", {}, [h("div", { class: "row" }, [e.dec, e.fmt, e.dayLbl, e.note])])]);
+            draw(r);
+            return e.row;
           }))])])]));
     });
     update();
