@@ -32,7 +32,8 @@ restart the backend.
    find & replace across sheets, add a formula to an empty column, then save. The original stays one click away (↺).
 4. **Data types** tab: lock the type of chosen output columns (text / whole number / decimal / date). Every run forces those columns into
    that type and sets the Excel cell format; unreadable values are left empty and reported in the run notes.
-5. **Run on new data** → drop new input → download the `.xlsx`.
+5. **Run on new data** → drop new input → (optionally) add several filter conditions for this run, matching ALL or ANY, on any column of
+   the file (its real columns and values are offered) → download the `.xlsx`. The run filter stacks on the system's stored input filter.
 
 Local preview: `python dev/serve.py` → http://localhost:5181. Sample data: `dev/sample_data/` (`python dev/make_dummy_data.py`).
 Tests: `cd tests && python -m pytest -q`.

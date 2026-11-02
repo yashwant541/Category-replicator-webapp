@@ -179,8 +179,21 @@ def api_run(sid):
         tv = _json.loads(request.form.get("toggles") or "{}")
     except ValueError:
         tv = {}
-    res = service.run_system(store(), sid, inputs, _files("mappings"), tv or None)
+    try:
+        rf = _json.loads(request.form.get("filters") or "null")
+    except ValueError:
+        raise ValueError("The run filter is not valid JSON")
+    res = service.run_system(store(), sid, inputs, _files("mappings"), tv or None, rf)
     return ok(run=res)
+
+
+@app.route("/api/systems/<sid>/inspect-input", methods=["POST"])
+@guarded
+def api_inspect_input(sid):
+    files = _files("files")
+    if not files:
+        raise ValueError("Upload at least one input file.")
+    return ok(**service.inspect_input(store(), sid, files))
 
 
 @app.route("/api/systems/<sid>/runs", methods=["GET"])

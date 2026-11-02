@@ -832,6 +832,28 @@ def apply_dtype_edits(system: Dict[str, Any], edits: List[Dict[str, Any]]) -> in
     return len(plan)
 
 
+# ============================================================== filtering one run's data
+RUN_OPS = ("==", "!=", ">", ">=", "<", "<=", "in", "not in", "contains", "not contains", "startswith", "endswith", "blank", "not blank")
+
+
+def clean_run_filter(rf: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Validate a filter typed for one run: {match: all|any, conditions: [{col, op, value}]}."""
+    if not rf or not rf.get("conditions"):
+        return None
+    match = rf.get("match", "all")
+    if match not in ("all", "any"):
+        raise ValueError("Run filter: match must be 'all' or 'any'")
+    conds = []
+    for c in rf["conditions"][:50]:
+        col, op = str(c.get("col", "")).strip(), c.get("op", "==")
+        if not col:
+            raise ValueError("Run filter: choose a column for every condition")
+        if op not in RUN_OPS:
+            raise ValueError("Run filter: unknown operator '%s'" % op)
+        conds.append({"col": col, "op": op, "value": c.get("value")})
+    return {"match": match, "conditions": conds}
+
+
 # ======================================================================= applying it
 def _sheet_frame(d: Dict[str, Any], rows: pd.DataFrame) -> Tuple[pd.DataFrame, List[str]]:
     """The sheet as it will be written: pasted input values (forced into any locked type) + the sample's formulas
@@ -864,7 +886,8 @@ def _sheet_frame(d: Dict[str, Any], rows: pd.DataFrame) -> Tuple[pd.DataFrame, L
 
 def apply_system(system: Dict[str, Any], df_in: pd.DataFrame,
                  table_override: Optional[Dict[str, pd.DataFrame]] = None,
-                 toggle_override: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+                 toggle_override: Optional[Dict[str, str]] = None,
+                 run_filter: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     df, notes = prepare_input(system, df_in)
     n_in = len(df)
     pre = system.get("filters", {}).get("pre", [])
@@ -877,6 +900,18 @@ def apply_system(system: Dict[str, Any], df_in: pd.DataFrame,
                                  % (c["col"], ", ".join(map(str, df.columns[:15]))))
         df = df[conditions_mask(df, pre).values].reset_index(drop=True)
         notes.append(f"Input filter kept {len(df)} of {n_in} rows.")
+    rf = clean_run_filter(run_filter)
+    if rf:                                   # filters typed for THIS run, on top of the system's input filter
+        for c in rf["conditions"]:
+            try:
+                R.resolve_col(df, c["col"])
+            except R.RuleError:
+                raise ValueError("Run filter: the input has no column '%s'. Columns found: %s."
+                                 % (c["col"], ", ".join(map(str, df.columns[:15]))))
+        before = len(df)
+        df = df[conditions_mask(df, rf["conditions"], rf["match"]).values].reset_index(drop=True)
+        notes.append("Run filter (%s of %d condition(s)) kept %d of %d rows."
+                     % (rf["match"].upper(), len(rf["conditions"]), len(df), before))
     frames = tables_to_frames(system, table_override)
     toggles_now = effective_toggles(system, frames, toggle_override)
     rows, snotes = split_frames(system, df, df)

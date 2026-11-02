@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import pandas as pd
 
 from . import engine
-from .rules import nk
+from .rules import disp, is_blank, nk
 from .store import delete_prefix, get_json, put_json
 from .tables import formula_sheet_refs, guess_role, jsonable, read_workbook, summarize, canonical_columns
 
@@ -294,7 +294,8 @@ def _read_inputs(system: Dict[str, Any], files: List[Tuple[str, bytes]]
 
 def run_system(store, sid: str, input_files: List[Tuple[str, bytes]],
                mapping_files: Optional[List[Tuple[str, bytes]]] = None,
-               toggle_values: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+               toggle_values: Optional[Dict[str, str]] = None,
+               run_filter: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     s = get_system(store, sid)
     df, _, used = _read_inputs(s, input_files)
     override = {}
@@ -303,7 +304,7 @@ def run_system(store, sid: str, input_files: List[Tuple[str, bytes]],
             for tname in s["tables"]:
                 if nk(tname) == nk(sh["sheet"]) or nk(tname) == nk(re.sub(r"\.[^.]+$", "", name)):
                     override[tname] = sh["df"]
-    res = engine.apply_system(s, df, override, toggle_values)
+    res = engine.apply_system(s, df, override, toggle_values, run_filter)
     notes = list(res["notes"])
     if override:
         notes.append("Mapping tables replaced for this run: " + ", ".join(override))
@@ -311,7 +312,10 @@ def run_system(store, sid: str, input_files: List[Tuple[str, bytes]],
     if empty:
         notes.append("No formula was found in your sample for: " + ", ".join(dict.fromkeys(empty)) + " - left empty.")
     tg = {t["name"]: t.get("value") for t in res["toggles"]}
-    summary = [("Toggles used", ", ".join("%s = %s" % kv for kv in tg.items()) or "none"),
+    rf = engine.clean_run_filter(run_filter)
+    summary = [("Run filter", ("%s of: " % rf["match"].upper() + "; ".join(
+        "%s %s %s" % (c["col"], c["op"], c.get("value") if c.get("value") is not None else "") for c in rf["conditions"])) if rf else "none"),
+               ("Toggles used", ", ".join("%s = %s" % kv for kv in tg.items()) or "none"),
                ("Input files", [f"{u['file']} / {u['sheet']} ({u['rows']} rows)" for u in used])]
     if notes:
         summary.append(("Notes", notes))
@@ -327,10 +331,22 @@ def run_system(store, sid: str, input_files: List[Tuple[str, bytes]],
                        "data": [[jsonable(v) for v in r] for r in f.head(25).itertuples(index=False, name=None)]}
     meta = {"run_id": rid, "system": sid, "created": _now(), "rows": int(res["rows"]),
             "input_rows": int(res["input_rows"]), "sheets": {k: v["rows"] for k, v in preview.items()},
-            "notes": notes, "inputs": used, "toggles": res["toggles"],
+            "notes": notes, "inputs": used, "toggles": res["toggles"], "run_filter": rf,
             "filename": f"{_slug(s['name'])}_{rid}.xlsx"}
     put_json(store, f"runs/{sid}/{rid}/meta.json", meta)
     return {**meta, "preview": preview}
+
+
+def inspect_input(store, sid: str, files: List[Tuple[str, bytes]]) -> Dict[str, Any]:
+    """What the new input looks like, so a run filter can offer its real columns and values."""
+    s = get_system(store, sid)
+    df, _, used = _read_inputs(s, files)
+    values: Dict[str, List[str]] = {}
+    for c in df.columns:
+        vals = sorted({disp(v) for v in df[c] if not is_blank(v)})
+        if 0 < len(vals) <= 30:
+            values[str(c)] = [v[:40] for v in vals]
+    return {"columns": [str(c) for c in df.columns], "rows": int(len(df)), "sheets": used, "values": values}
 
 
 def list_runs(store, sid: str) -> List[Dict[str, Any]]:

@@ -522,7 +522,7 @@
       const list = h("div", { class: "small muted", style: "margin-top:6px" });
       const refresh = () => { list.textContent = files[key].map(f => f.name).join(", "); };
       const inp = h("input", { type: "file", ...(multiple ? { multiple: true } : {}), accept: ".xlsx,.xlsm,.xls,.csv" });
-      const set = fl => { files[key] = Array.prototype.slice.call(fl); refresh(); };
+      const set = fl => { files[key] = Array.prototype.slice.call(fl); refresh(); if (key === "in") onInput(); };
       inp.addEventListener("change", () => set(inp.files));
       const z = h("label", { class: "drop" }, [h("div", { text: sub }), inp]);
       z.addEventListener("dragover", e => { e.preventDefault(); z.classList.add("over"); });
@@ -530,12 +530,54 @@
       z.addEventListener("drop", e => { e.preventDefault(); z.classList.remove("over"); set(e.dataTransfer.files); });
       return h("div", {}, [h("h3", { text: title }), z, list]);
     }
+    // ---- optional filters for THIS run's data (several conditions), on top of the system's stored input filter
+    const rf = { match: "all", conds: [] };
+    let info = null;                                       // what the dropped file looks like (columns, rows, value suggestions)
+    const filterBox = h("div", { class: "card", style: "margin:12px 0 0;box-shadow:none;background:var(--surface-2)" });
+    const colList = () => info ? info.columns : (s.input.filter_columns || s.input.columns);
+    const active = () => rf.conds.filter(c => c.col && (c.op === "blank" || c.op === "not blank" || String(c.value == null ? "" : c.value).trim() !== ""));
+    async function onInput() {
+      info = null; drawFilter();
+      if (!files.in.length) return;
+      try {
+        const fd = new FormData(); files.in.forEach(f => fd.append("files", f));
+        info = await call("/api/systems/" + s.id + "/inspect-input", { method: "POST", body: fd });
+      } catch (e) { toast(e.message, true); }
+      drawFilter();
+    }
+    function drawFilter() {
+      clear(filterBox);
+      const cols = colList();
+      filterBox.appendChild(h("div", { class: "row" }, [h("h3", { text: "Filter this run's data (optional)", style: "margin:0" }), h("span", { class: "spacer" }),
+        info ? h("span", { class: "pill ok", text: info.rows + " rows · " + info.columns.length + " columns in your file" }) : (files.in.length ? h("span", { class: "muted small" }, [h("span", { class: "spin" }), "reading your file…"]) : null)]));
+      filterBox.appendChild(h("div", { class: "muted small", text: "Keep only some of the new data for this run. Add as many conditions as you like on any column of the file. This is applied on top of the system's own input filter and before the rows are split into sheets; it is not saved." }));
+      rf.conds.forEach((c, i) => {
+        const dl = h("datalist", { id: "rfv" + i }, ((info && info.values[c.col]) || []).map(v => h("option", { value: v })));
+        const col = h("select", { class: "inl", onchange: e => { c.col = e.target.value; drawFilter(); } },
+          (cols.indexOf(c.col) < 0 && c.col ? [c.col].concat(cols) : cols).map(x => h("option", { value: x, text: x, ...(x === c.col ? { selected: true } : {}) })));
+        const op = h("select", { class: "inl", onchange: e => { c.op = e.target.value; drawFilter(); } }, OPS.map(x => h("option", { value: x, text: x, ...(x === c.op ? { selected: true } : {}) })));
+        const noval = c.op === "blank" || c.op === "not blank";
+        const hint = h("span", { class: "muted small", text: "(ignored while empty)" });
+        const showHint = () => { hint.style.display = (!noval && String(c.value == null ? "" : c.value).trim() === "") ? "" : "none"; };
+        const val = h("input", { type: "text", class: "inl", list: "rfv" + i, value: c.value == null ? "" : c.value, placeholder: c.op === "in" || c.op === "not in" ? "a, b, c" : "value",
+          style: noval ? "display:none" : "", oninput: e => { c.value = e.target.value; showHint(); } });
+        showHint();
+        filterBox.appendChild(h("div", { class: "cond" }, [col, op, val, dl, hint,
+          h("button", { class: "icon-btn", text: "✕", onclick: () => { rf.conds.splice(i, 1); drawFilter(); } })]));
+      });
+      const bar = [h("button", { class: "btn ghost small", text: "+ condition", onclick: () => { rf.conds.push({ col: colList()[0], op: "==", value: "" }); drawFilter(); } })];
+      if (rf.conds.length > 1) bar.push(h("span", { class: "small" }, [" rows must match ", h("select", { class: "inl", onchange: e => { rf.match = e.target.value; } },
+        [["all", "ALL conditions"], ["any", "ANY condition"]].map(([v, l]) => h("option", { value: v, text: l, ...(rf.match === v ? { selected: true } : {}) })))]));
+      filterBox.appendChild(h("div", { class: "row", style: "margin-top:6px" }, bar));
+    }
+    drawFilter();
     const out = h("div", {});
     const btn = h("button", { class: "btn", text: "Run", onclick: async () => {
       if (!files.in.length) return toast("Add at least one input file", true);
       const fd = new FormData();
       files.in.forEach(f => fd.append("files", f)); files.map.forEach(f => fd.append("mappings", f));
       if (Object.keys(tog).length) fd.append("toggles", JSON.stringify(tog));
+      if (active().length) fd.append("filters", JSON.stringify({ match: rf.match, conditions: active() }));
       btn.disabled = true; btn.textContent = "Running…";
       try { LAST_RUN = (await call("/api/systems/" + s.id + "/run", { method: "POST", body: fd })).run; showRun(out, LAST_RUN); }
       catch (e) { toast(e.message, true); }
@@ -545,6 +587,7 @@
       h("div", { class: "muted small", text: "Upload new input in the same layout (" + s.input.required.slice(0, 6).join(", ") + (s.input.required.length > 6 ? "…" : "") + "). The system builds every derived column" + (s.filters.split.enabled ? " and splits the rows into the sample's sheets" : "") + "." }),
       h("div", { class: "grid g2", style: "margin-top:12px" }, [zone("in", "Input file(s)", "Drop new input here", true),
         zone("map", "Updated mappings / toggles (optional)", "Replace the stored mapping or Toggle sheets for this run", true)]),
+      filterBox,
       togBox,
       h("div", { class: "row", style: "margin-top:14px" }, [
         h("span", { class: "muted small", text: "The output holds your sample's formulas; Excel calculates them when the file is opened." }),
