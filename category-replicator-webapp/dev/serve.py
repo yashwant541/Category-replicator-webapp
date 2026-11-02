@@ -35,7 +35,7 @@ def _samples():
 
 @app.route("/dev/sample/<name>")
 def _sample(name):
-    for folder in ("sample_data", "samples", "sample_data/bank", "sample_data/toggle"):
+    for folder in ("sample_data", "samples", "sample_data/bank", "sample_data/toggle", "sample_data/filter_cols"):
         f = HERE / folder / pathlib.Path(name).name
         if f.exists():
             return Response(f.read_bytes(), mimetype="application/octet-stream")

@@ -584,25 +584,27 @@
   /* ------------------------------------------------------------ filters tab */
   function tabFilters(body) {
     const F = JSON.parse(JSON.stringify(SYS.filters));
-    const cols = SYS.input.columns;
-    function condEditor(list, rerender) {
+    const cols = SYS.input.columns;                                  // split conditions: unchanged
+    const allCols = SYS.input.filter_columns || SYS.input.columns;   // whole-data (input) filter: every column of every input sheet
+    function condEditor(list, rerender, colList) {
+      colList = colList || cols;
       const wrap = h("div", {});
       list.forEach((c, i) => {
-        const col = h("select", { class: "inl", onchange: e => { c.col = e.target.value; } }, cols.map(x => h("option", { value: x, text: x, ...(x === c.col ? { selected: true } : {}) })));
+        const col = h("select", { class: "inl", onchange: e => { c.col = e.target.value; } }, (colList.indexOf(c.col) < 0 ? [c.col].concat(colList) : colList).map(x => h("option", { value: x, text: x, ...(x === c.col ? { selected: true } : {}) })));
         const op = h("select", { class: "inl", onchange: e => { c.op = e.target.value; rerender(); } }, OPS.map(x => h("option", { value: x, text: x, ...(x === c.op ? { selected: true } : {}) })));
         const noval = c.op === "blank" || c.op === "not blank";
         const val = h("input", { type: "text", class: "inl", value: Array.isArray(c.value) ? c.value.join(",") : (c.value == null ? "" : c.value), placeholder: "value", ...(noval ? { style: "display:none" } : {}),
           oninput: e => { c.value = e.target.value; } });
         wrap.appendChild(h("div", { class: "cond" }, [col, op, val, h("button", { class: "icon-btn", text: "✕", onclick: () => { list.splice(i, 1); rerender(); } })]));
       });
-      wrap.appendChild(h("button", { class: "btn ghost small", text: "+ condition", onclick: () => { list.push({ col: cols[0], op: "==", value: "" }); rerender(); } }));
+      wrap.appendChild(h("button", { class: "btn ghost small", text: "+ condition", onclick: () => { list.push({ col: colList[0], op: "==", value: "" }); rerender(); } }));
       return wrap;
     }
     function draw() {
       clear(body);
       body.appendChild(h("div", { class: "card" }, [h("h2", { text: "Input filter" }),
-        h("div", { class: "muted small", text: "Rows must satisfy ALL of these to be processed (applied before any column is built)." }),
-        condEditor(F.pre, draw)]));
+        h("div", { class: "muted small", text: "Applies to the whole input data, before it is split into sheets. Rows must satisfy ALL of these. You can use any of the " + allCols.length + " columns of your input." }),
+        condEditor(F.pre, draw, allCols)]));
       const sp = F.split;
       const card = h("div", { class: "card" }, [h("div", { class: "row" }, [h("h2", { text: "Split into several output sheets", style: "margin:0" }), h("span", { class: "spacer" }),
         h("label", { class: "small" }, [h("input", { type: "checkbox", ...(sp.enabled ? { checked: true } : {}), onchange: e => { sp.enabled = e.target.checked; draw(); } }), " enabled"])])]);

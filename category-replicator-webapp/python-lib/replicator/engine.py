@@ -599,7 +599,9 @@ def build_system(entries: List[Dict[str, Any]], options: Dict[str, Any]) -> Dict
         "name": options.get("name") or "Untitled system",
         "description": options.get("description", ""),
         "created": dt.datetime.utcnow().isoformat(timespec="seconds") + "Z",
-        "input": {"columns": [str(c) for c in X.columns], "sources": [{"file": e["file"], "sheet": e["sheet"], "rows": int(len(e["df"]))} for e in primary]},
+        "input": {"columns": [str(c) for c in X.columns],
+                  "filter_columns": list(dict.fromkeys([str(c) for c in X.columns] + [str(c) for e in ins for c in e["df"].columns])),
+                  "sources": [{"file": e["file"], "sheet": e["sheet"], "rows": int(len(e["df"]))} for e in primary]},
         "tables": tables, "table_sources": table_src, "toggles": toggles_from_tables(tables),
         "output": {"sheet_name": outs[0]["sheet"],
                    "extra_tables": [e["sheet"] for e in maps if e["file"] in out_files]},
@@ -867,6 +869,12 @@ def apply_system(system: Dict[str, Any], df_in: pd.DataFrame,
     n_in = len(df)
     pre = system.get("filters", {}).get("pre", [])
     if pre:
+        for c in pre:
+            try:
+                R.resolve_col(df, c["col"])
+            except R.RuleError:
+                raise ValueError("The input filter uses column '%s', which this input does not have. Columns found: %s."
+                                 % (c["col"], ", ".join(map(str, df.columns[:15]))))
         df = df[conditions_mask(df, pre).values].reset_index(drop=True)
         notes.append(f"Input filter kept {len(df)} of {n_in} rows.")
     frames = tables_to_frames(system, table_override)
