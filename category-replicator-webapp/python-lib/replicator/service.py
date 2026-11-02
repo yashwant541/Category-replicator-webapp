@@ -337,16 +337,47 @@ def run_system(store, sid: str, input_files: List[Tuple[str, bytes]],
     return {**meta, "preview": preview}
 
 
+def _stash(store, files: List[Tuple[str, bytes]]) -> str:
+    """Keep a loaded input briefly (tmp/<token>/) so filter previews do not re-upload it every keystroke."""
+    token = dt.datetime.utcnow().strftime("%Y%m%d%H%M%S") + "-" + uuid.uuid4().hex[:6]
+    for i, (name, data) in enumerate(files):
+        store.put(f"tmp/{token}/{i}__{_slug(name)}", data)
+    cutoff = (dt.datetime.utcnow() - dt.timedelta(days=1)).strftime("%Y%m%d%H%M%S")
+    for p in store.list("tmp/"):                                  # drop stashes older than a day
+        t = p.strip("/").split("/")[1] if p.count("/") >= 2 else ""
+        if t and t[:14] < cutoff:
+            store.delete(p)
+    return token
+
+
+def _unstash(store, token: str) -> List[Tuple[str, bytes]]:
+    if not re.fullmatch(r"[0-9]{14}-[0-9a-f]{6}", token or ""):
+        raise ValueError("Drop the new input file again (its temporary copy is gone).")
+    paths = sorted(store.list(f"tmp/{token}/"), key=lambda p: int(p.rsplit("/", 1)[1].split("__", 1)[0]))
+    if not paths:
+        raise ValueError("Drop the new input file again (its temporary copy is gone).")
+    return [(p.rsplit("/", 1)[1].split("__", 1)[1], store.get(p)) for p in paths]
+
+
+def preview_filter(store, sid: str, token: str, run_filter: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Row counts before/after the filters for an already loaded input (see inspect_input)."""
+    s = get_system(store, sid)
+    df, _, _ = _read_inputs(s, _unstash(store, token))
+    return engine.preview_counts(s, df, run_filter)
+
+
 def inspect_input(store, sid: str, files: List[Tuple[str, bytes]]) -> Dict[str, Any]:
     """What the new input looks like, so a run filter can offer its real columns and values."""
     s = get_system(store, sid)
     df, _, used = _read_inputs(s, files)
+    token = _stash(store, files)
     values: Dict[str, List[str]] = {}
     for c in df.columns:
         vals = sorted({disp(v) for v in df[c] if not is_blank(v)})
         if 0 < len(vals) <= 30:
             values[str(c)] = [v[:40] for v in vals]
-    return {"columns": [str(c) for c in df.columns], "rows": int(len(df)), "sheets": used, "values": values}
+    return {"columns": [str(c) for c in df.columns], "rows": int(len(df)), "sheets": used, "values": values, "token": token,
+            "preview": engine.preview_counts(s, df, None)}
 
 
 def list_runs(store, sid: str) -> List[Dict[str, Any]]:

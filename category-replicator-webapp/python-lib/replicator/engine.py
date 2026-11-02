@@ -884,12 +884,12 @@ def _sheet_frame(d: Dict[str, Any], rows: pd.DataFrame) -> Tuple[pd.DataFrame, L
     return pd.DataFrame(data, columns=[c["name"] for c in d["columns"]], dtype=object), issues
 
 
-def apply_system(system: Dict[str, Any], df_in: pd.DataFrame,
-                 table_override: Optional[Dict[str, pd.DataFrame]] = None,
-                 toggle_override: Optional[Dict[str, str]] = None,
-                 run_filter: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+def filter_stages(system: Dict[str, Any], df_in: pd.DataFrame, run_filter: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Load -> system input filter -> this run's filter, remembering the row count after every step.
+    The same routine feeds the live preview and the real run, so the two can never disagree."""
     df, notes = prepare_input(system, df_in)
     n_in = len(df)
+    stages = [{"key": "loaded", "label": "Loaded", "rows": n_in}]
     pre = system.get("filters", {}).get("pre", [])
     if pre:
         for c in pre:
@@ -900,7 +900,9 @@ def apply_system(system: Dict[str, Any], df_in: pd.DataFrame,
                                  % (c["col"], ", ".join(map(str, df.columns[:15]))))
         df = df[conditions_mask(df, pre).values].reset_index(drop=True)
         notes.append(f"Input filter kept {len(df)} of {n_in} rows.")
+        stages.append({"key": "input_filter", "label": "System input filter", "rows": len(df)})
     rf = clean_run_filter(run_filter)
+    each: List[Dict[str, Any]] = []
     if rf:                                   # filters typed for THIS run, on top of the system's input filter
         for c in rf["conditions"]:
             try:
@@ -908,10 +910,29 @@ def apply_system(system: Dict[str, Any], df_in: pd.DataFrame,
             except R.RuleError:
                 raise ValueError("Run filter: the input has no column '%s'. Columns found: %s."
                                  % (c["col"], ", ".join(map(str, df.columns[:15]))))
+            each.append(dict(c, matches=int(conditions_mask(df, [c], "all").sum())))     # this condition alone
         before = len(df)
         df = df[conditions_mask(df, rf["conditions"], rf["match"]).values].reset_index(drop=True)
         notes.append("Run filter (%s of %d condition(s)) kept %d of %d rows."
                      % (rf["match"].upper(), len(rf["conditions"]), len(df), before))
+        stages.append({"key": "run_filter", "label": "Your filters", "rows": len(df)})
+    return {"df": df, "notes": notes, "stages": stages, "each": each, "input_rows": n_in}
+
+
+def preview_counts(system: Dict[str, Any], df_in: pd.DataFrame, run_filter: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Row counts before / after every filter and per output sheet - without building anything."""
+    st = filter_stages(system, df_in, run_filter)
+    rows, snotes = split_frames(system, st["df"], st["df"])
+    return {"stages": st["stages"], "each": st["each"], "loaded": st["input_rows"], "after": int(len(st["df"])),
+            "sheets": OrderedDict((k, int(len(v))) for k, v in rows.items()), "notes": st["notes"] + snotes}
+
+
+def apply_system(system: Dict[str, Any], df_in: pd.DataFrame,
+                 table_override: Optional[Dict[str, pd.DataFrame]] = None,
+                 toggle_override: Optional[Dict[str, str]] = None,
+                 run_filter: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    st = filter_stages(system, df_in, run_filter)
+    df, notes, n_in = st["df"], st["notes"], st["input_rows"]
     frames = tables_to_frames(system, table_override)
     toggles_now = effective_toggles(system, frames, toggle_override)
     rows, snotes = split_frames(system, df, df)

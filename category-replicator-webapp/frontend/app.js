@@ -535,6 +535,48 @@
     let info = null;                                       // what the dropped file looks like (columns, rows, value suggestions)
     const filterBox = h("div", { class: "card", style: "margin:12px 0 0;box-shadow:none;background:var(--surface-2)" });
     const colList = () => info ? info.columns : (s.input.filter_columns || s.input.columns);
+    // ---- live row counts: before / after the filters, recomputed (debounced) whenever the conditions change
+    const countsBox = h("div", { style: "margin-top:12px" });
+    let pv = null, pvErr = "", pvBusy = false, seq = 0, timer = null;
+    let badges = [];                                       // per-condition "matches N rows" labels of the current rows
+    function schedulePreview() {
+      clearTimeout(timer);
+      if (!info || !info.token) return;
+      pvBusy = true; renderCounts();
+      timer = setTimeout(runPreview, 350);
+    }
+    async function runPreview() {
+      const my = ++seq;
+      try {
+        const flt = active().length ? { match: rf.match, conditions: active() } : null;
+        const r = await call("/api/systems/" + s.id + "/preview-filter", { method: "POST", json: { token: info.token, filters: flt } });
+        if (my !== seq) return; pv = r; pvErr = "";
+      } catch (e) { if (my !== seq) return; pvErr = e.message; }
+      pvBusy = false; renderCounts();
+    }
+    function renderCounts() {
+      clear(countsBox);
+      badges.forEach(b => { b.el.textContent = ""; });
+      if (!info) return;
+      const pr = pv || info.preview;
+      if (pvErr) { countsBox.appendChild(h("div", { class: "note err", text: pvErr })); return; }
+      const act = active();
+      (pr.each || []).forEach((e, k) => { const t = badges.find(b => b.c === act[k]); if (t) t.el.textContent = "matches " + e.matches + " row(s)"; });
+      const steps = [];
+      pr.stages.forEach((x, i) => {
+        if (i) steps.push(h("span", { class: "muted", text: "→", style: "align-self:center;font-size:18px" }));
+        steps.push(h("div", {}, [h("b", { text: x.rows }), h("span", { text: x.label + (x.key === "loaded" ? " (before filters)" : "") })]));
+      });
+      const removed = pr.loaded - pr.after;
+      countsBox.appendChild(h("div", { class: "row" }, [h("div", { class: "stat", style: "margin:0" }, steps),
+        h("div", {}, [h("div", { class: "small" }, [h("b", { text: pr.after }), " of ", h("b", { text: pr.loaded }), " rows will be used",
+          removed ? h("span", { class: "muted", text: "  (" + removed + " removed, " + Math.round(100 * removed / Math.max(1, pr.loaded)) + "%)" }) : null,
+          pvBusy ? h("span", { class: "spin", style: "margin-left:8px" }) : null])])]));
+      const sh = Object.keys(pr.sheets || {});
+      if (sh.length > 1 || (sh.length === 1 && sh[0] !== "")) countsBox.appendChild(h("div", { class: "row small", style: "margin-top:6px" },
+        [h("span", { class: "muted", text: "Rows per output sheet:" }), ...sh.map(k => h("span", { class: "pill " + (pr.sheets[k] ? "acc" : "warn"), text: k + " · " + pr.sheets[k] }))]));
+      if (!pr.after) countsBox.appendChild(h("div", { class: "note", text: "No rows are left after the filters — the output would be empty." }));
+    }
     const active = () => rf.conds.filter(c => c.col && (c.op === "blank" || c.op === "not blank" || String(c.value == null ? "" : c.value).trim() !== ""));
     async function onInput() {
       info = null; drawFilter();
@@ -542,8 +584,10 @@
       try {
         const fd = new FormData(); files.in.forEach(f => fd.append("files", f));
         info = await call("/api/systems/" + s.id + "/inspect-input", { method: "POST", body: fd });
+        pv = null; pvErr = "";
       } catch (e) { toast(e.message, true); }
       drawFilter();
+      if (info && active().length) schedulePreview();
     }
     function drawFilter() {
       clear(filterBox);
@@ -551,24 +595,29 @@
       filterBox.appendChild(h("div", { class: "row" }, [h("h3", { text: "Filter this run's data (optional)", style: "margin:0" }), h("span", { class: "spacer" }),
         info ? h("span", { class: "pill ok", text: info.rows + " rows · " + info.columns.length + " columns in your file" }) : (files.in.length ? h("span", { class: "muted small" }, [h("span", { class: "spin" }), "reading your file…"]) : null)]));
       filterBox.appendChild(h("div", { class: "muted small", text: "Keep only some of the new data for this run. Add as many conditions as you like on any column of the file. This is applied on top of the system's own input filter and before the rows are split into sheets; it is not saved." }));
+      badges = [];
       rf.conds.forEach((c, i) => {
         const dl = h("datalist", { id: "rfv" + i }, ((info && info.values[c.col]) || []).map(v => h("option", { value: v })));
-        const col = h("select", { class: "inl", onchange: e => { c.col = e.target.value; drawFilter(); } },
+        const col = h("select", { class: "inl", onchange: e => { c.col = e.target.value; drawFilter(); schedulePreview(); } },
           (cols.indexOf(c.col) < 0 && c.col ? [c.col].concat(cols) : cols).map(x => h("option", { value: x, text: x, ...(x === c.col ? { selected: true } : {}) })));
-        const op = h("select", { class: "inl", onchange: e => { c.op = e.target.value; drawFilter(); } }, OPS.map(x => h("option", { value: x, text: x, ...(x === c.op ? { selected: true } : {}) })));
+        const op = h("select", { class: "inl", onchange: e => { c.op = e.target.value; drawFilter(); schedulePreview(); } }, OPS.map(x => h("option", { value: x, text: x, ...(x === c.op ? { selected: true } : {}) })));
         const noval = c.op === "blank" || c.op === "not blank";
         const hint = h("span", { class: "muted small", text: "(ignored while empty)" });
         const showHint = () => { hint.style.display = (!noval && String(c.value == null ? "" : c.value).trim() === "") ? "" : "none"; };
         const val = h("input", { type: "text", class: "inl", list: "rfv" + i, value: c.value == null ? "" : c.value, placeholder: c.op === "in" || c.op === "not in" ? "a, b, c" : "value",
-          style: noval ? "display:none" : "", oninput: e => { c.value = e.target.value; showHint(); } });
+          style: noval ? "display:none" : "", oninput: e => { c.value = e.target.value; showHint(); schedulePreview(); } });
+        const badge = h("span", { class: "pill acc", style: "font-weight:500" });
+        badges.push({ c, el: badge });
         showHint();
-        filterBox.appendChild(h("div", { class: "cond" }, [col, op, val, dl, hint,
-          h("button", { class: "icon-btn", text: "✕", onclick: () => { rf.conds.splice(i, 1); drawFilter(); } })]));
+        filterBox.appendChild(h("div", { class: "cond" }, [col, op, val, dl, hint, badge,
+          h("button", { class: "icon-btn", text: "✕", onclick: () => { rf.conds.splice(i, 1); drawFilter(); schedulePreview(); } })]));
       });
       const bar = [h("button", { class: "btn ghost small", text: "+ condition", onclick: () => { rf.conds.push({ col: colList()[0], op: "==", value: "" }); drawFilter(); } })];
-      if (rf.conds.length > 1) bar.push(h("span", { class: "small" }, [" rows must match ", h("select", { class: "inl", onchange: e => { rf.match = e.target.value; } },
+      if (rf.conds.length > 1) bar.push(h("span", { class: "small" }, [" rows must match ", h("select", { class: "inl", onchange: e => { rf.match = e.target.value; schedulePreview(); } },
         [["all", "ALL conditions"], ["any", "ANY condition"]].map(([v, l]) => h("option", { value: v, text: l, ...(rf.match === v ? { selected: true } : {}) })))]));
       filterBox.appendChild(h("div", { class: "row", style: "margin-top:6px" }, bar));
+      filterBox.appendChild(countsBox);
+      renderCounts();
     }
     drawFilter();
     const out = h("div", {});

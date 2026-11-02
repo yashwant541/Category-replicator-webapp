@@ -196,6 +196,13 @@ def api_inspect_input(sid):
     return ok(**service.inspect_input(store(), sid, files))
 
 
+@app.route("/api/systems/<sid>/preview-filter", methods=["POST"])
+@guarded
+def api_preview_filter(sid):
+    body = request.get_json(silent=True) or {}
+    return ok(**service.preview_filter(store(), sid, body.get("token", ""), body.get("filters")))
+
+
 @app.route("/api/systems/<sid>/runs", methods=["GET"])
 @guarded
 def api_runs(sid):
