@@ -43,17 +43,109 @@ SRC = "Source sheet"
 _BAD_SHEET = re.compile(r"[\[\]:*?/\\]")
 
 
+MAX_GROUP_DEPTH = 5
+
+
+def is_group(c: Dict[str, Any]) -> bool:
+    return isinstance(c, dict) and "conditions" in c
+
+
 def conditions_mask(df: pd.DataFrame, conds: List[Dict[str, Any]], match: str = "all") -> pd.Series:
+    """Rows passing a list of conditions joined by ALL (AND) / ANY (OR).  An item is either a condition
+    {col, op, value} or a group {match, conditions: [...]} that has its own ALL/ANY - groups nest."""
     if not conds:
         return pd.Series(True, index=df.index)
     masks = []
     for c in conds:
-        col = R.resolve_col(df, c["col"])
-        masks.append(cmp_mask(df[col], c["op"], c.get("value")))
+        if is_group(c):
+            masks.append(conditions_mask(df, c["conditions"], c.get("match", "all")))
+        else:
+            masks.append(cmp_mask(df[R.find_col(df, c["col"])], c["op"], c.get("value")))
     m = masks[0]
     for x in masks[1:]:
         m = (m & x) if match == "all" else (m | x)
     return m
+
+
+def condition_leaves(conds: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Every single condition, however deeply it is grouped."""
+    out: List[Dict[str, Any]] = []
+    for c in conds or []:
+        out.extend(condition_leaves(c["conditions"]) if is_group(c) else [c])
+    return out
+
+
+def describe_conditions(conds: List[Dict[str, Any]], match: str = "all") -> str:
+    parts = []
+    for c in conds or []:
+        if is_group(c):
+            parts.append("(" + describe_conditions(c["conditions"], c.get("match", "all")) + ")")
+        else:
+            v = c.get("value")
+            parts.append(" ".join(x for x in (str(c["col"]), c["op"], "" if v is None or c["op"] in ("blank", "not blank") else str(v)) if x))
+    return (" AND " if match == "all" else " OR ").join(parts)
+
+
+def filter_column_names(system: Dict[str, Any]) -> List[str]:
+    f = system.get("filters", {})
+    names = [c["col"] for c in condition_leaves(f.get("pre", []))]
+    for s in (f.get("split") or {}).get("sheets", []):
+        names += [c["col"] for c in condition_leaves(s.get("conditions", []))]
+    return names
+
+
+def missing_columns(df: pd.DataFrame, conds: List[Dict[str, Any]]) -> List[str]:
+    out = []
+    for c in condition_leaves(conds):
+        try:
+            R.find_col(df, c["col"])
+        except R.RuleError as exc:
+            if "several" in str(exc):
+                raise ValueError(str(exc))
+            out.append(c["col"])
+    return list(dict.fromkeys(out))
+
+
+def clean_conditions(conds: Any, label: str, depth: int = 0) -> List[Dict[str, Any]]:
+    """Validate (and tidy) a tree of conditions/groups typed by the user.  Conditions with no column are an error;
+    empty groups are dropped."""
+    if depth > MAX_GROUP_DEPTH:
+        raise ValueError(f"{label}: groups are nested too deeply (at most {MAX_GROUP_DEPTH} levels)")
+    out: List[Dict[str, Any]] = []
+    for c in (conds or [])[:100]:
+        if is_group(c):
+            if c.get("match", "all") not in ("all", "any"):
+                raise ValueError(f"{label}: a group must be ALL or ANY")
+            inner = clean_conditions(c["conditions"], label, depth + 1)
+            if inner:
+                out.append({"match": c.get("match", "all"), "conditions": inner})
+            continue
+        col, op = str(c.get("col", "")).strip(), c.get("op", "==")
+        if not col:
+            raise ValueError(f"{label}: choose a column for every condition")
+        if op not in RUN_OPS:
+            raise ValueError(f"{label}: unknown operator '{op}'")
+        out.append({"col": col, "op": op, "value": c.get("value")})
+    return out
+
+
+def clean_filters(flt: Dict[str, Any]) -> Dict[str, Any]:
+    """The system's saved filters: the input filter (ALL/ANY of conditions and groups) and each custom sheet's."""
+    flt = dict(flt or {})
+    if flt.get("pre_match", "all") not in ("all", "any"):
+        raise ValueError("Input filter: match must be 'all' or 'any'")
+    flt["pre"] = clean_conditions(flt.get("pre"), "Input filter")
+    flt["pre_match"] = flt.get("pre_match", "all")
+    sp = dict(flt.get("split") or {})
+    sheets = []
+    for sh in sp.get("sheets") or []:
+        if sh.get("match", "all") not in ("all", "any"):
+            raise ValueError(f"Sheet '{sh.get('name')}': match must be 'all' or 'any'")
+        sheets.append(dict(sh, conditions=clean_conditions(sh.get("conditions"), f"Sheet '{sh.get('name')}' filter")))
+    if "sheets" in sp:
+        sp["sheets"] = sheets
+    flt["split"] = sp
+    return flt
 
 
 _INV = {">=": "<", "<": ">=", ">": "<=", "<=": ">", "==": "!=", "!=": "=="}
@@ -245,7 +337,8 @@ def prepare_input(system: Dict[str, Any], df: pd.DataFrame) -> Tuple[pd.DataFram
         if c not in have:
             df[c] = np.nan
             notes.append(f"Input column '{c}' not found - treated as blank.")
-    extra = [c for c in df.columns if c not in set(wanted)]
+    filt = {R._SQUASH.sub("", disp(c).lower()) for c in filter_column_names(system)}      # columns only a filter needs are not "ignored"
+    extra = [c for c in df.columns if c not in set(wanted) and R._SQUASH.sub("", disp(c).lower()) not in filt]
     if extra:
         notes.append("Ignored extra input column(s): " + ", ".join(map(str, extra[:8])))
     return df, notes
@@ -566,7 +659,7 @@ def build_system(entries: List[Dict[str, Any]], options: Dict[str, Any]) -> Dict
                        "columns": cols, "params": _param_cells(e, cols, hr), "sample_rows": int(len(df))})
 
     # ---- filters: the input filter + which rows each sheet holds (the user can edit both)
-    flt: Dict[str, Any] = {"pre": [], "split": {"enabled": False, "mode": "column", "column": "", "map": {},
+    flt: Dict[str, Any] = {"pre": [], "pre_match": "all", "split": {"enabled": False, "mode": "column", "column": "", "map": {},
                                                 "new_values": "create", "sheets": [], "rest_sheet": ""}}
     known = [m for m in masks.values() if m is not None]
     if len(known) == len(masks):
@@ -620,14 +713,14 @@ def finalize_system(system: Dict[str, Any]) -> None:
         if c and nk(c) in incols and incols[nk(c)] not in required:
             required.append(incols[nk(c)])
     f = system.get("filters", {})
-    for c in f.get("pre", []):
+    for c in condition_leaves(f.get("pre", [])):          # typed-in columns that are not in the sample are looked up by name on a run
         need(c["col"])
     sp = f.get("split", {})
     if sp.get("enabled"):
         if sp.get("mode") == "column":
             need(sp.get("column"))
         for s in sp.get("sheets", []):
-            for c in s.get("conditions", []):
+            for c in condition_leaves(s.get("conditions", [])):
                 need(c["col"])
     system["input"]["required"] = required
 
@@ -843,15 +936,8 @@ def clean_run_filter(rf: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     match = rf.get("match", "all")
     if match not in ("all", "any"):
         raise ValueError("Run filter: match must be 'all' or 'any'")
-    conds = []
-    for c in rf["conditions"][:50]:
-        col, op = str(c.get("col", "")).strip(), c.get("op", "==")
-        if not col:
-            raise ValueError("Run filter: choose a column for every condition")
-        if op not in RUN_OPS:
-            raise ValueError("Run filter: unknown operator '%s'" % op)
-        conds.append({"col": col, "op": op, "value": c.get("value")})
-    return {"match": match, "conditions": conds}
+    conds = clean_conditions(rf["conditions"], "Run filter")
+    return {"match": match, "conditions": conds} if conds else None
 
 
 # ======================================================================= applying it
@@ -890,27 +976,33 @@ def filter_stages(system: Dict[str, Any], df_in: pd.DataFrame, run_filter: Optio
     df, notes = prepare_input(system, df_in)
     n_in = len(df)
     stages = [{"key": "loaded", "label": "Loaded", "rows": n_in}]
-    pre = system.get("filters", {}).get("pre", [])
+    f = system.get("filters", {})
+    pre, pre_match = f.get("pre", []), f.get("pre_match", "all")
+
+    def check(conds, who):
+        gone = missing_columns(df, conds)
+        if gone:
+            raise ValueError("%s uses column %s, which this input does not have (looked for it in any upper/lower case). "
+                             "Columns found: %s." % (who, ", ".join("'%s'" % g for g in gone), ", ".join(map(str, df.columns[:15]))))
+
+    def renamed(conds):                      # tell the user when a typed name was matched to a differently written column
+        for c in condition_leaves(conds):
+            got = R.find_col(df, c["col"])
+            if got != c["col"]:
+                notes.append("Filter column '%s' was matched to '%s'." % (c["col"], got))
     if pre:
-        for c in pre:
-            try:
-                R.resolve_col(df, c["col"])
-            except R.RuleError:
-                raise ValueError("The input filter uses column '%s', which this input does not have. Columns found: %s."
-                                 % (c["col"], ", ".join(map(str, df.columns[:15]))))
-        df = df[conditions_mask(df, pre).values].reset_index(drop=True)
+        check(pre, "The input filter")
+        renamed(pre)
+        df = df[conditions_mask(df, pre, pre_match).values].reset_index(drop=True)
         notes.append(f"Input filter kept {len(df)} of {n_in} rows.")
         stages.append({"key": "input_filter", "label": "System input filter", "rows": len(df)})
     rf = clean_run_filter(run_filter)
     each: List[Dict[str, Any]] = []
     if rf:                                   # filters typed for THIS run, on top of the system's input filter
-        for c in rf["conditions"]:
-            try:
-                R.resolve_col(df, c["col"])
-            except R.RuleError:
-                raise ValueError("Run filter: the input has no column '%s'. Columns found: %s."
-                                 % (c["col"], ", ".join(map(str, df.columns[:15]))))
-            each.append(dict(c, matches=int(conditions_mask(df, [c], "all").sum())))     # this condition alone
+        check(rf["conditions"], "Run filter")
+        renamed(rf["conditions"])
+        for c in rf["conditions"]:           # every top-level condition or group on its own
+            each.append(dict(c, matches=int(conditions_mask(df, [c], "all").sum())))
         before = len(df)
         df = df[conditions_mask(df, rf["conditions"], rf["match"]).values].reset_index(drop=True)
         notes.append("Run filter (%s of %d condition(s)) kept %d of %d rows."

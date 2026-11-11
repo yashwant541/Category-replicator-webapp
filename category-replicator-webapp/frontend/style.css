@@ -89,6 +89,11 @@ table.t tr:hover td { background: var(--surface-2); }
 .note { padding: 8px 12px; border-radius: 8px; margin: 6px 0; font-size: 13px; background: var(--warn-soft); color: var(--warn); }
 .note.err { background: var(--danger-soft); color: var(--danger); } .note.good { background: var(--ok-soft); color: var(--ok); }
 .cond { display: flex; gap: 6px; align-items: center; margin: 5px 0; flex-wrap: wrap; }
+.grp { border-left: 3px solid var(--accent); background: var(--accent-soft); border-radius: 0 8px 8px 0; padding: 4px 8px 6px 10px; margin: 8px 0 8px 2px; }
+.grp .grp { background: var(--surface-2); border-left-color: var(--purple); }
+.cond input.col { width: 170px; }
+.cond .found { font-size: 11.5px; }
+.cond .found.ok { color: var(--ok); } .cond .found.warn { color: var(--warn); }
 .bar { height: 6px; border-radius: 3px; background: var(--surface-3); overflow: hidden; min-width: 70px; }
 .bar > i { display: block; height: 100%; background: var(--ok); }
 .bar.warn > i { background: var(--warn); } .bar.bad > i { background: var(--danger); }

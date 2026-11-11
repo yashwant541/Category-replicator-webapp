@@ -50,7 +50,71 @@
   const KIND = { copy: "Copy", const: "Constant", text: "Text", datepart: "Date part", arith: "Maths", concat: "Join text",
     lookup: "Mapping lookup", cond: "IF / bands", learned_map: "Learned map", formula: "Excel formula" };
   const STATUS = { ok: ["ok", "OK"], approx: ["warn", "Approximate"], unresolved: ["bad", "Needs a rule"], manual: ["manual", "Manual"], unchecked: ["acc", "From formula"], excel: ["acc", "Excel calculates"] };
-  const OPS = ["==", "!=", ">", ">=", "<", "<=", "in", "not in", "contains", "startswith", "endswith", "blank", "not blank"];
+  const OPS = ["==", "!=", ">", ">=", "<", "<=", "in", "not in", "contains", "not contains", "startswith", "endswith", "blank", "not blank"];
+  const OP_LABEL = { "==": "equals", "!=": "does not equal", "in": "is one of", "not in": "is not one of", "contains": "contains", "not contains": "does not contain",
+    "startswith": "starts with", "endswith": "ends with", "blank": "is blank", "not blank": "is not blank" };
+
+  /* A tree of conditions joined by ALL (AND) / ANY (OR); a group {match, conditions} nests another list.
+     The column is typed (any case) or picked from the suggestions; the app finds it by name on every run.
+     o = { cols: () => [names], values?: col => [suggestions], changed: () => void, rerender: () => void, top?: (item, badgeEl) => void } */
+  const sqz = x => String(x == null ? "" : x).toLowerCase().replace(/[^0-9a-z]+/g, "");
+  let CB_ID = 0;
+  function condBuilder(list, o, depth) {
+    depth = depth || 0;
+    const wrap = h("div", {});
+    const noVal = c => c.op === "blank" || c.op === "not blank";
+    const matchSel = (obj, key) => h("select", { class: "inl", onchange: e => { obj[key] = e.target.value; o.changed(); } },
+      [["all", "ALL of these (AND)"], ["any", "ANY of these (OR)"]].map(([v, l]) => h("option", { value: v, text: l, ...((obj[key] || "all") === v ? { selected: true } : {}) })));
+    list.forEach((c, i) => {
+      const del = h("button", { class: "icon-btn", text: "✕", title: "Remove", onclick: () => { list.splice(i, 1); o.rerender(); } });
+      const badge = h("span", { class: "pill acc", style: "font-weight:500" });
+      if (c.conditions) {
+        c.match = c.match || "all";
+        wrap.appendChild(h("div", { class: "grp" }, [
+          h("div", { class: "row small", style: "margin-bottom:2px" }, [h("b", { text: "Group" }), h("span", { text: "— rows must match" }), matchSel(c, "match"), badge, h("span", { class: "spacer" }), del]),
+          condBuilder(c.conditions, o, depth + 1)]));
+        if (depth === 0 && o.top) o.top(c, badge);
+        return;
+      }
+      const dlId = "cb" + (++CB_ID);
+      const names = o.cols();
+      const found = h("span", { class: "found" });
+      const showFound = () => {
+        const t = String(c.col || "").trim();
+        const hit = t ? names.find(x => x === t) || names.find(x => String(x).toLowerCase().trim() === t.toLowerCase()) || names.find(x => sqz(x) === sqz(t)) : null;
+        found.className = "found " + (!t ? "" : hit ? "ok" : "warn");
+        found.textContent = !t ? "" : hit ? (hit === t ? "✓" : "✓ " + hit) : "not in the list — will be looked up by name on every run";
+      };
+      const col = h("input", { type: "text", class: "inl col", list: dlId, value: c.col || "", placeholder: "column name",
+        oninput: e => { c.col = e.target.value; showFound(); o.changed(); }, onchange: () => { if (o.values) o.rerender(); } });
+      const dl = h("datalist", { id: dlId }, names.map(x => h("option", { value: x })));
+      const op = h("select", { class: "inl", onchange: e => { c.op = e.target.value; o.rerender(); o.changed(); } },
+        OPS.map(x => h("option", { value: x, text: OP_LABEL[x] || x, ...(x === c.op ? { selected: true } : {}) })));
+      const vdl = h("datalist", { id: dlId + "v" }, ((o.values && o.values(c.col)) || []).map(v => h("option", { value: v })));
+      const val = h("input", { type: "text", class: "inl", list: dlId + "v", value: Array.isArray(c.value) ? c.value.join(",") : (c.value == null ? "" : c.value),
+        placeholder: c.op === "in" || c.op === "not in" ? "a, b, c" : (c.op === "contains" || c.op === "not contains" ? "text anywhere in the value" : "value"),
+        style: noVal(c) ? "display:none" : "", oninput: e => { c.value = e.target.value; o.changed(); } });
+      showFound();
+      wrap.appendChild(h("div", { class: "cond" }, [col, dl, op, val, vdl, found, badge, del]));
+      if (depth === 0 && o.top) o.top(c, badge);
+    });
+    const bar = [h("button", { class: "btn ghost small", text: "+ condition", onclick: () => { list.push({ col: "", op: "==", value: "" }); o.rerender(); } })];
+    if (depth < 4) bar.push(h("button", { class: "btn ghost small", text: "+ AND/OR group", onclick: () => { list.push({ match: "any", conditions: [{ col: "", op: "==", value: "" }] }); o.rerender(); } }));
+    wrap.appendChild(h("div", { class: "row", style: "margin-top:4px" }, bar));
+    return wrap;
+  }
+  // drop conditions that are not filled in yet (no column, or no value unless the operator needs none) and empty groups
+  function pruneConds(list, strict) {
+    const out = [];
+    (list || []).forEach(c => {
+      if (c.conditions) { const inner = pruneConds(c.conditions, strict); if (inner.length) out.push({ match: c.match || "all", conditions: inner, _src: c }); return; }
+      if (!String(c.col || "").trim()) return;
+      if (strict && !(c.op === "blank" || c.op === "not blank") && String(c.value == null ? "" : c.value).trim() === "") return;
+      out.push({ col: String(c.col).trim(), op: c.op, value: c.value, _src: c });
+    });
+    return out;
+  }
+  const stripSrc = list => list.map(c => c.conditions ? { match: c.match, conditions: stripSrc(c.conditions) } : { col: c.col, op: c.op, value: c.value });
 
   function dl(url) { const a = document.createElement("a"); a.href = API + url; a.click(); }
 
@@ -560,8 +624,8 @@
       if (!info) return;
       const pr = pv || info.preview;
       if (pvErr) { countsBox.appendChild(h("div", { class: "note err", text: pvErr })); return; }
-      const act = active();
-      (pr.each || []).forEach((e, k) => { const t = badges.find(b => b.c === act[k]); if (t) t.el.textContent = "matches " + e.matches + " row(s)"; });
+      const act = activeTop();
+      (pr.each || []).forEach((e, k) => { const t = badges.find(b => act[k] && b.c === act[k]._src); if (t) t.el.textContent = "matches " + e.matches + " row(s)"; });
       const steps = [];
       pr.stages.forEach((x, i) => {
         if (i) steps.push(h("span", { class: "muted", text: "→", style: "align-self:center;font-size:18px" }));
@@ -577,7 +641,8 @@
         [h("span", { class: "muted", text: "Rows per output sheet:" }), ...sh.map(k => h("span", { class: "pill " + (pr.sheets[k] ? "acc" : "warn"), text: k + " · " + pr.sheets[k] }))]));
       if (!pr.after) countsBox.appendChild(h("div", { class: "note", text: "No rows are left after the filters — the output would be empty." }));
     }
-    const active = () => rf.conds.filter(c => c.col && (c.op === "blank" || c.op === "not blank" || String(c.value == null ? "" : c.value).trim() !== ""));
+    const activeTop = () => pruneConds(rf.conds, true);          // filled-in conditions/groups (each remembers its editor row in _src)
+    const active = () => stripSrc(activeTop());
     async function onInput() {
       info = null; drawFilter();
       if (!files.in.length) return;
@@ -594,28 +659,14 @@
       const cols = colList();
       filterBox.appendChild(h("div", { class: "row" }, [h("h3", { text: "Filter this run's data (optional)", style: "margin:0" }), h("span", { class: "spacer" }),
         info ? h("span", { class: "pill ok", text: info.rows + " rows · " + info.columns.length + " columns in your file" }) : (files.in.length ? h("span", { class: "muted small" }, [h("span", { class: "spin" }), "reading your file…"]) : null)]));
-      filterBox.appendChild(h("div", { class: "muted small", text: "Keep only some of the new data for this run. Add as many conditions as you like on any column of the file. This is applied on top of the system's own input filter and before the rows are split into sheets; it is not saved." }));
+      filterBox.appendChild(h("div", { class: "muted small", text: "Keep only some of the new data for this run. Add conditions on any column of the file — type the column name in any case — and combine them with ALL (AND) / ANY (OR), including groups inside groups. Example: Import does not contain NONTP. Conditions without a value are ignored. This is applied on top of the system's own input filter and before the rows are split into sheets; it is not saved." }));
       badges = [];
-      rf.conds.forEach((c, i) => {
-        const dl = h("datalist", { id: "rfv" + i }, ((info && info.values[c.col]) || []).map(v => h("option", { value: v })));
-        const col = h("select", { class: "inl", onchange: e => { c.col = e.target.value; drawFilter(); schedulePreview(); } },
-          (cols.indexOf(c.col) < 0 && c.col ? [c.col].concat(cols) : cols).map(x => h("option", { value: x, text: x, ...(x === c.col ? { selected: true } : {}) })));
-        const op = h("select", { class: "inl", onchange: e => { c.op = e.target.value; drawFilter(); schedulePreview(); } }, OPS.map(x => h("option", { value: x, text: x, ...(x === c.op ? { selected: true } : {}) })));
-        const noval = c.op === "blank" || c.op === "not blank";
-        const hint = h("span", { class: "muted small", text: "(ignored while empty)" });
-        const showHint = () => { hint.style.display = (!noval && String(c.value == null ? "" : c.value).trim() === "") ? "" : "none"; };
-        const val = h("input", { type: "text", class: "inl", list: "rfv" + i, value: c.value == null ? "" : c.value, placeholder: c.op === "in" || c.op === "not in" ? "a, b, c" : "value",
-          style: noval ? "display:none" : "", oninput: e => { c.value = e.target.value; showHint(); schedulePreview(); } });
-        const badge = h("span", { class: "pill acc", style: "font-weight:500" });
-        badges.push({ c, el: badge });
-        showHint();
-        filterBox.appendChild(h("div", { class: "cond" }, [col, op, val, dl, hint, badge,
-          h("button", { class: "icon-btn", text: "✕", onclick: () => { rf.conds.splice(i, 1); drawFilter(); schedulePreview(); } })]));
-      });
-      const bar = [h("button", { class: "btn ghost small", text: "+ condition", onclick: () => { rf.conds.push({ col: colList()[0], op: "==", value: "" }); drawFilter(); } })];
-      if (rf.conds.length > 1) bar.push(h("span", { class: "small" }, [" rows must match ", h("select", { class: "inl", onchange: e => { rf.match = e.target.value; schedulePreview(); } },
-        [["all", "ALL conditions"], ["any", "ANY condition"]].map(([v, l]) => h("option", { value: v, text: l, ...(rf.match === v ? { selected: true } : {}) })))]));
-      filterBox.appendChild(h("div", { class: "row", style: "margin-top:6px" }, bar));
+      if (rf.conds.length > 1) filterBox.appendChild(h("div", { class: "row small", style: "margin-top:6px" }, [h("span", { text: "Rows must match" }),
+        h("select", { class: "inl", onchange: e => { rf.match = e.target.value; schedulePreview(); } },
+          [["all", "ALL of these (AND)"], ["any", "ANY of these (OR)"]].map(([v, l]) => h("option", { value: v, text: l, ...(rf.match === v ? { selected: true } : {}) })))]));
+      filterBox.appendChild(condBuilder(rf.conds, {
+        cols: colList, values: col => { const t = String(col || "").trim().toLowerCase(); const k = info && Object.keys(info.values).find(x => x.toLowerCase().trim() === t || sqz(x) === sqz(t)); return k ? info.values[k] : []; },
+        changed: schedulePreview, rerender: () => { drawFilter(); schedulePreview(); }, top: (c, el) => badges.push({ c, el }) }));
       filterBox.appendChild(countsBox);
       renderCounts();
     }
@@ -678,24 +729,18 @@
     const F = JSON.parse(JSON.stringify(SYS.filters));
     const cols = SYS.input.columns;                                  // split conditions: unchanged
     const allCols = SYS.input.filter_columns || SYS.input.columns;   // whole-data (input) filter: every column of every input sheet
+    // conditions and AND/OR groups; the column can be picked from the sample's columns or typed (any case) - it is found by name on every run
     function condEditor(list, rerender, colList) {
-      colList = colList || cols;
-      const wrap = h("div", {});
-      list.forEach((c, i) => {
-        const col = h("select", { class: "inl", onchange: e => { c.col = e.target.value; } }, (colList.indexOf(c.col) < 0 ? [c.col].concat(colList) : colList).map(x => h("option", { value: x, text: x, ...(x === c.col ? { selected: true } : {}) })));
-        const op = h("select", { class: "inl", onchange: e => { c.op = e.target.value; rerender(); } }, OPS.map(x => h("option", { value: x, text: x, ...(x === c.op ? { selected: true } : {}) })));
-        const noval = c.op === "blank" || c.op === "not blank";
-        const val = h("input", { type: "text", class: "inl", value: Array.isArray(c.value) ? c.value.join(",") : (c.value == null ? "" : c.value), placeholder: "value", ...(noval ? { style: "display:none" } : {}),
-          oninput: e => { c.value = e.target.value; } });
-        wrap.appendChild(h("div", { class: "cond" }, [col, op, val, h("button", { class: "icon-btn", text: "✕", onclick: () => { list.splice(i, 1); rerender(); } })]));
-      });
-      wrap.appendChild(h("button", { class: "btn ghost small", text: "+ condition", onclick: () => { list.push({ col: colList[0], op: "==", value: "" }); rerender(); } }));
-      return wrap;
+      return condBuilder(list, { cols: () => colList || cols, changed: () => {}, rerender });
     }
+    const matchPick = (obj, key, rerender) => h("select", { class: "inl", onchange: e => { obj[key] = e.target.value; rerender(); } },
+      [["all", "ALL of these (AND)"], ["any", "ANY of these (OR)"]].map(([v, l]) => h("option", { value: v, text: l, ...((obj[key] || "all") === v ? { selected: true } : {}) })));
     function draw() {
       clear(body);
+      F.pre = F.pre || [];
       body.appendChild(h("div", { class: "card" }, [h("h2", { text: "Input filter" }),
-        h("div", { class: "muted small", text: "Applies to the whole input data, before it is split into sheets. Rows must satisfy ALL of these. You can use any of the " + allCols.length + " columns of your input." }),
+        h("div", { class: "muted small", text: "Applies to the whole input data, before it is split into sheets. Add conditions, or AND/OR groups of conditions (groups can hold groups). For example: IMPORT does not contain NONTP removes every row whose IMPORT has NONTP anywhere in it, such as NONTP-ABCD or ABCD-NONTP. Type any column name — upper or lower case — even one that is not in your sample; it is found by name in the new data on every run. The list suggests the " + allCols.length + " columns of your input." }),
+        F.pre.length > 1 ? h("div", { class: "row small", style: "margin-top:8px" }, [h("span", { text: "Rows must match" }), matchPick(F, "pre_match", draw)]) : null,
         condEditor(F.pre, draw, allCols)]));
       const sp = F.split;
       const card = h("div", { class: "card" }, [h("div", { class: "row" }, [h("h2", { text: "Split into several output sheets", style: "margin:0" }), h("span", { class: "spacer" }),
@@ -726,7 +771,9 @@
       }
       body.appendChild(card);
       body.appendChild(h("div", { class: "row" }, [h("span", { class: "spacer" }), h("button", { class: "btn", text: "Save filters", onclick: async () => {
-        F.pre = F.pre.filter(c => c.col); try { await saveSystem({ filters: F }, "Filters saved"); } catch (e) { toast(e.message, true); } } })]));
+        F.pre = stripSrc(pruneConds(F.pre, false));
+        ((F.split || {}).sheets || []).forEach(sh => { sh.conditions = stripSrc(pruneConds(sh.conditions, false)); });
+        try { await saveSystem({ filters: F }, "Filters saved"); } catch (e) { toast(e.message, true); } } })]));
     }
     draw();
   }

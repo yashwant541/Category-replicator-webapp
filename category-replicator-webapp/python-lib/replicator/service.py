@@ -249,9 +249,10 @@ def update_system(store, sid: str, patch: Dict[str, Any]) -> Dict[str, Any]:
     for k in ("name", "description"):
         if k in patch:
             s[k] = str(patch[k])
-    for k in ("filters", "toggles"):
-        if k in patch:
-            s[k] = patch[k]
+    if "filters" in patch:
+        s["filters"] = engine.clean_filters(patch["filters"])
+    if "toggles" in patch:
+        s["toggles"] = patch["toggles"]
     if patch.get("formulas"):
         engine.apply_formula_edits(s, patch["formulas"])
     if patch.get("dtypes"):
@@ -313,8 +314,7 @@ def run_system(store, sid: str, input_files: List[Tuple[str, bytes]],
         notes.append("No formula was found in your sample for: " + ", ".join(dict.fromkeys(empty)) + " - left empty.")
     tg = {t["name"]: t.get("value") for t in res["toggles"]}
     rf = engine.clean_run_filter(run_filter)
-    summary = [("Run filter", ("%s of: " % rf["match"].upper() + "; ".join(
-        "%s %s %s" % (c["col"], c["op"], c.get("value") if c.get("value") is not None else "") for c in rf["conditions"])) if rf else "none"),
+    summary = [("Run filter", engine.describe_conditions(rf["conditions"], rf["match"]) if rf else "none"),
                ("Toggles used", ", ".join("%s = %s" % kv for kv in tg.items()) or "none"),
                ("Input files", [f"{u['file']} / {u['sheet']} ({u['rows']} rows)" for u in used])]
     if notes:

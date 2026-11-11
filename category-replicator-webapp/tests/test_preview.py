@@ -55,7 +55,7 @@ def test_the_preview_equals_what_the_real_run_produces():
 def test_preview_errors_are_clear_and_a_lost_file_is_reported():
     st, s = system()
     token = load(st, s)["token"]
-    with pytest.raises(ValueError, match="no column 'Nope'"):
+    with pytest.raises(ValueError, match="uses column 'Nope'"):
         service.preview_filter(st, s["id"], token, {"conditions": [cond("Nope", "==", 1)]})
     with pytest.raises(ValueError, match="Drop the new input file again"):
         service.preview_filter(st, s["id"], "20200101000000-abcdef", None)

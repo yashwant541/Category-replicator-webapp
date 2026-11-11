@@ -1,1 +1,1 @@
-{"systems": {"517c60991a": {"id": "517c60991a", "name": "Test", "description": "dada", "created": "2026-10-26T04:49:34Z", "updated": "2026-10-26T04:49:34Z", "n_rules": 22, "n_review": 0, "n_tables": 1, "split": true, "match": 1.0, "columns": 22}}}
+{"systems": {"8538344c77": {"id": "8538344c77", "name": "Filter test", "description": "", "created": "2026-11-11T09:41:53Z", "updated": "2026-11-11T09:41:54Z", "n_sheets": 4, "n_formulas": 26, "n_review": 0, "n_tables": 4, "split": true, "columns": 70}}}

@@ -1,0 +1,41 @@
+{
+ "headers": [
+  "Rating",
+  "PD",
+  "RiskWeight"
+ ],
+ "records": [
+  {
+   "Rating": "AAA",
+   "PD": 0.0003,
+   "RiskWeight": 0.2
+  },
+  {
+   "Rating": "AA",
+   "PD": 0.001,
+   "RiskWeight": 0.2
+  },
+  {
+   "Rating": "A",
+   "PD": 0.003,
+   "RiskWeight": 0.5
+  },
+  {
+   "Rating": "BBB",
+   "PD": 0.01,
+   "RiskWeight": 1
+  },
+  {
+   "Rating": "BB",
+   "PD": 0.04,
+   "RiskWeight": 1
+  },
+  {
+   "Rating": "B",
+   "PD": 0.1,
+   "RiskWeight": 1.5
+  }
+ ],
+ "header_row": 0,
+ "col_offset": 0
+}

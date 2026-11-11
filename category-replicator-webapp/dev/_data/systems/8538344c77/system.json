@@ -1,0 +1,110 @@
+{
+ "engine": "2026.10a",
+ "id": "8538344c77",
+ "name": "Filter test",
+ "description": "",
+ "created": "2026-11-11T09:41:53Z",
+ "input": {
+  "columns": [
+   "LoanID",
+   "Customer",
+   "Segment",
+   "Region",
+   "Product",
+   "Rating",
+   "Country",
+   "Currency",
+   "Exposure",
+   "Collateral",
+   "Maturity",
+   "Source sheet"
+  ],
+  "filter_columns": [
+   "LoanID",
+   "Customer",
+   "Segment",
+   "Region",
+   "Product",
+   "Rating",
+   "Country",
+   "Currency",
+   "Exposure",
+   "Collateral",
+   "Maturity",
+   "Source sheet"
+  ],
+  "sources": [
+   {
+    "file": "1_input_exposures.xlsx",
+    "sheet": "Retail_EMEA",
+    "rows": 28
+   },
+   {
+    "file": "1_input_exposures.xlsx",
+    "sheet": "Retail_APAC",
+    "rows": 24
+   },
+   {
+    "file": "1_input_exposures.xlsx",
+    "sheet": "Corporate_Global",
+    "rows": 26
+   },
+   {
+    "file": "1_input_exposures.xlsx",
+    "sheet": "SME_Global",
+    "rows": 22
+   }
+  ],
+  "required": [
+   "Source sheet"
+  ]
+ },
+ "table_sources": {
+  "Ratings": "2_mapping_tables.xlsx / Ratings",
+  "Products": "2_mapping_tables.xlsx / Products",
+  "Countries": "2_mapping_tables.xlsx / Countries",
+  "FX": "2_mapping_tables.xlsx / FX"
+ },
+ "toggles": [],
+ "output": {
+  "sheet_name": "Retail_EMEA",
+  "extra_tables": [
+   "Ratings",
+   "Products",
+   "Countries",
+   "FX"
+  ]
+ },
+ "filters": {
+  "pre": [],
+  "pre_match": "all",
+  "split": {
+   "enabled": true,
+   "mode": "column",
+   "column": "Source sheet",
+   "map": {
+    "Retail_EMEA": "Retail_EMEA",
+    "Retail_APAC": "Retail_APAC",
+    "Corporate_Global": "Corporate_Global",
+    "SME_Global": "SME_Global"
+   },
+   "new_values": "create",
+   "sheets": [],
+   "rest_sheet": ""
+  }
+ },
+ "warnings": [],
+ "updated": "2026-11-11T09:41:54Z",
+ "table_files": {
+  "Ratings": "Ratings",
+  "Products": "Products",
+  "Countries": "Countries",
+  "FX": "FX"
+ },
+ "table_hashes": {
+  "Ratings": "71d01b048b041946f24ea89b6d3d4478",
+  "Products": "92b9efc5f6e3f44572d3f8a75ad6e327",
+  "Countries": "653bacfc10fa56ff2c2560195d6b0d4c",
+  "FX": "ed64d719de1329a1f9c1bec3ef3063a1"
+ }
+}

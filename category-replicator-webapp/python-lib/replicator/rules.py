@@ -174,6 +174,24 @@ def resolve_col(df: pd.DataFrame, name: str) -> str:
     raise RuleError(f"column '{name}' not found")
 
 
+_SQUASH = re.compile(r"[^0-9a-z]+")
+
+
+def find_col(df: pd.DataFrame, name: str) -> str:
+    """Find the column a filter was typed for: exact, then any case/spacing, then ignoring spaces, _ and -
+    ('import', ' IMPORT ', 'Import_Type' all find 'Import Type').  Several matches -> an error, never a guess."""
+    if name in df.columns:
+        return name
+    for key in (lambda x: nk(x), lambda x: _SQUASH.sub("", disp(x).lower())):
+        want = key(name)
+        hit = [c for c in df.columns if want and key(c) == want]
+        if len(hit) == 1:
+            return hit[0]
+        if len(hit) > 1:
+            raise RuleError(f"column '{name}' matches several columns: {', '.join(map(str, hit[:4]))}")
+    raise RuleError(f"column '{name}' not found")
+
+
 def get_col(work: pd.DataFrame, name: str) -> pd.Series:
     return work[resolve_col(work, name)]
 

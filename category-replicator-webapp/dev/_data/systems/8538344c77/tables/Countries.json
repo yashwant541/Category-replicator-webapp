@@ -1,0 +1,71 @@
+{
+ "headers": [
+  "Country",
+  "Region",
+  "CountryRisk"
+ ],
+ "records": [
+  {
+   "Country": "UK",
+   "Region": "EMEA",
+   "CountryRisk": "Low"
+  },
+  {
+   "Country": "DE",
+   "Region": "EMEA",
+   "CountryRisk": "Low"
+  },
+  {
+   "Country": "FR",
+   "Region": "EMEA",
+   "CountryRisk": "Low"
+  },
+  {
+   "Country": "AE",
+   "Region": "EMEA",
+   "CountryRisk": "Medium"
+  },
+  {
+   "Country": "EG",
+   "Region": "EMEA",
+   "CountryRisk": "High"
+  },
+  {
+   "Country": "SG",
+   "Region": "APAC",
+   "CountryRisk": "Low"
+  },
+  {
+   "Country": "IN",
+   "Region": "APAC",
+   "CountryRisk": "Medium"
+  },
+  {
+   "Country": "JP",
+   "Region": "APAC",
+   "CountryRisk": "Low"
+  },
+  {
+   "Country": "ID",
+   "Region": "APAC",
+   "CountryRisk": "High"
+  },
+  {
+   "Country": "US",
+   "Region": "AMER",
+   "CountryRisk": "Low"
+  },
+  {
+   "Country": "BR",
+   "Region": "AMER",
+   "CountryRisk": "High"
+  },
+  {
+   "Country": "CA",
+   "Region": "AMER",
+   "CountryRisk": "Low"
+  }
+ ],
+ "header_row": 0,
+ "col_offset": 0
+}

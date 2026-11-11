@@ -71,12 +71,12 @@ def test_no_filter_means_all_rows_and_the_run_records_what_was_used():
     run, wb = output_book(st, s, book(), run_filter={"match": "all", "conditions": [cond("Tier", "==", "B")]})
     assert run["run_filter"]["conditions"][0]["col"] == "Tier"
     summary = [r for r in wb["Run summary"].iter_rows(values_only=True) if r[0] == "Run filter"][0][1]
-    assert summary == "ALL of: Tier == B"
+    assert summary == "Tier == B"
 
 
 def test_bad_filters_are_rejected_with_a_clear_message():
     st, s = system()
-    with pytest.raises(ValueError, match="no column 'Nope'"):
+    with pytest.raises(ValueError, match="uses column 'Nope'"):
         service.run_system(st, s["id"], [("n.xlsx", book())], run_filter={"conditions": [cond("Nope", "==", 1)]})
     with pytest.raises(ValueError, match="unknown operator"):
         service.run_system(st, s["id"], [("n.xlsx", book())], run_filter={"conditions": [cond("Tier", "DROP", 1)]})
