@@ -10,7 +10,7 @@ ROOT = pathlib.Path(__file__).resolve().parent
 LIB = ROOT / "python-lib"
 ORDER = [
     ("replicator_formulas", ["__init__", "formula_translate", "sample_parser", "compute"]),
-    ("replicator", ["__init__", "rules", "tables", "learn", "engine", "store", "service"]),
+    ("replicator", ["__init__", "rules", "perf", "fastread", "tables", "learn", "fastxlsx", "engine", "formats", "store", "service"]),
 ]
 
 out = ['# -*- coding: utf-8 -*-',

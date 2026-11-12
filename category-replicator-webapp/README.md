@@ -36,5 +36,23 @@ restart the backend.
    the file (its real columns and values are offered). Row counts update live: rows loaded → after the system's input filter → after your
    filters, how many rows each single condition matches, and how many rows each output sheet will get. Then download the `.xlsx`.
 
+## File formats and big data
+- **Read:** `.xlsx .xlsm .xltx .xltm` (formulas kept), `.xls .xlsb .ods` (values only; need `xlrd` / `pyxlsb` / `odfpy` installed), `.csv .tsv .txt`
+  (delimiter and encoding detected, `.gz` allowed), `.parquet` (needs `pyarrow`). The expected-output **sample** must be `.xlsx/.xlsm`
+  because only those keep readable formulas.
+- **Speed:** big workbooks are read sheet by sheet in worker processes, several big files at the same time; big outputs are written by a
+  streaming writer (`fastxlsx.py`) whose row chunks are encoded by worker processes. Formulas are generated while writing (never stored
+  per cell in memory). Small outputs still use openpyxl. Pyspark is not used: the work is cell-by-cell text building and zip writing,
+  which Spark cannot spread any better than local processes.
+- **Limits:** a sheet with more rows than fit on one tab continues on `Name (2)`, `Name (3)`… (each with its header and formulas filled down
+  from its own first row). Default 1,000,000 rows per tab (Excel's maximum is 1,048,576); set it per system under *Filters & outputs → Large
+  outputs* or per run under *Large data options*.
+- **Output in the input's format:** the `.xlsx` is always produced. If the input was `.xlsm/.xltx/.xltm` you also get the same workbook in that
+  format. `.xls/.xlsb/.ods/.parquet` cannot be written here - the run says so. Extra files have their own download buttons.
+- **Time:** every run reports total time, rows/second and the time of each stage (read, filter, build, write, save) in the result and History.
+- **Environment knobs:** `REPLICATOR_WORKERS` (default CPU count, max 8; 1 = no parallelism), `REPLICATOR_ROWS_PER_SHEET`,
+  `REPLICATOR_FAST_WRITE_ROWS` (default 100000), `REPLICATOR_PARALLEL_MIN_ROWS`, `REPLICATOR_PARALLEL_MIN_BYTES`, `REPLICATOR_MAX_UPLOAD_MB`
+  (default 2000). Benchmark: `python dev/benchmark.py 1000000`.
+
 Local preview: `python dev/serve.py` → http://localhost:5181. Sample data: `dev/sample_data/` (`python dev/make_dummy_data.py`).
 Tests: `cd tests && python -m pytest -q`.

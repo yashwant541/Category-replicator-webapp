@@ -7,17 +7,19 @@ import io
 import threading
 import re
 import uuid
+from collections import OrderedDict
 from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 
-from . import engine
+from . import engine, formats, perf
 from .rules import disp, is_blank, nk
 from .store import delete_prefix, get_json, put_json
-from .tables import formula_sheet_refs, guess_role, jsonable, read_workbook, summarize, canonical_columns
+from .tables import (file_ext, formula_sheet_refs, guess_role, holds_formulas, jsonable, read_many, read_workbook, summarize,
+                     supported, canonical_columns)
 
 _DRAFT_LOCK = threading.RLock()   # serialises the draft record update (uploads can overlap)
-ALLOWED = (".xlsx", ".xlsm", ".xls", ".csv", ".txt")
+SUPPORTED_TEXT = ".xlsx, .xlsm, .xlsb, .xls, .xltx, .xltm, .ods, .csv, .tsv, .txt, .gz or .parquet"
 ROLES = ("input", "mapping", "output", "ignore")
 
 
@@ -47,8 +49,11 @@ def add_draft_files(store, did: str, files: List[Tuple[str, bytes]], hint: str =
     get_draft(store, did)                      # fail early if the draft is unknown
     entries = []
     for name, data in files:                   # slow part (parsing) runs outside the lock
-        if not name.lower().endswith(ALLOWED):
-            raise ValueError(f"{name}: unsupported file type (use .xlsx, .xls or .csv)")
+        if not supported(name):
+            raise ValueError(f"{name}: unsupported file type (use {SUPPORTED_TEXT})")
+        if hint == "output" and not holds_formulas(name):
+            raise ValueError(f"{name}: the expected-output sample must be .xlsx / .xlsm (a {file_ext(name)} file keeps no readable "
+                             "formulas). Open it in Excel and Save As .xlsx.")
         report: List[Dict[str, Any]] = []
         sheets = read_workbook(data, name, report)
         if not sheets:
@@ -253,6 +258,12 @@ def update_system(store, sid: str, patch: Dict[str, Any]) -> Dict[str, Any]:
         s["filters"] = engine.clean_filters(patch["filters"])
     if "toggles" in patch:
         s["toggles"] = patch["toggles"]
+    if "max_rows_per_sheet" in patch:                    # output limit: a sheet continues on a new tab after this many rows
+        v = patch["max_rows_per_sheet"]
+        if v in (None, "", 0):
+            s["output"].pop("max_rows_per_sheet", None)
+        else:
+            s["output"]["max_rows_per_sheet"] = clean_run_options({"max_rows_per_sheet": v})["max_rows_per_sheet"]
     if patch.get("formulas"):
         engine.apply_formula_edits(s, patch["formulas"])
     if patch.get("dtypes"):
@@ -265,15 +276,15 @@ def update_system(store, sid: str, patch: Dict[str, Any]) -> Dict[str, Any]:
     return s
 
 
-def _read_inputs(system: Dict[str, Any], files: List[Tuple[str, bytes]]
+def _read_inputs(system: Dict[str, Any], files: List[Tuple[str, bytes]], workers: Optional[int] = None
                  ) -> Tuple[pd.DataFrame, List[str], List[Dict[str, Any]]]:
     cols = system["input"]["columns"]
     want = {nk(c) for c in cols if c != engine.SRC}
     req = {nk(c) for c in system["input"].get("required", []) if c != engine.SRC}
     frames, used = [], []
-    for name, data in files:
+    for (name, data), sheets in zip(files, read_many(files, workers, values_only=True)):      # big files are read at the same time
         scored = []
-        for s in read_workbook(data, name):
+        for s in sheets:
             have = {nk(c) for c in s["df"].columns}
             scored.append((len(want & have) / max(1, len(want)), req <= have, s))
         good = [s for sc, ok, s in scored if sc >= 0.6 and ok and len(s["df"])]
@@ -293,48 +304,109 @@ def _read_inputs(system: Dict[str, Any], files: List[Tuple[str, bytes]]
     return pd.concat(frames, ignore_index=True), [], used
 
 
+def clean_run_options(options: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Per-run settings for big data: max_rows_per_sheet, workers, fast_writer (True / False / None = by size)."""
+    o = options or {}
+    out: Dict[str, Any] = {}
+
+    def num(key: str, lo: int, hi: int) -> Optional[int]:
+        v = o.get(key)
+        if v in (None, ""):
+            return None
+        try:
+            n = int(str(v).replace(",", "").replace("_", ""))
+        except ValueError:
+            raise ValueError("Option %s must be a whole number" % key)
+        if not lo <= n <= hi:
+            raise ValueError("Option %s must be between %s and %s" % (key, format(lo, ","), format(hi, ",")))
+        return n
+    for key, lo, hi in (("max_rows_per_sheet", 1, perf.EXCEL_MAX_ROWS - 1), ("workers", 1, 64)):
+        v = num(key, lo, hi)
+        if v is not None:
+            out[key] = v
+    fw = o.get("fast_writer")
+    out["fast_writer"] = None if fw in (None, "", "auto") else (fw is True or str(fw).lower() in ("1", "true", "yes", "on"))
+    return out
+
+
 def run_system(store, sid: str, input_files: List[Tuple[str, bytes]],
                mapping_files: Optional[List[Tuple[str, bytes]]] = None,
                toggle_values: Optional[Dict[str, str]] = None,
-               run_filter: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+               run_filter: Optional[Dict[str, Any]] = None,
+               options: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    timer = perf.Timer()
     s = get_system(store, sid)
-    df, _, used = _read_inputs(s, input_files)
-    override = {}
-    for name, data in mapping_files or []:
-        for sh in read_workbook(data, name):
-            for tname in s["tables"]:
-                if nk(tname) == nk(sh["sheet"]) or nk(tname) == nk(re.sub(r"\.[^.]+$", "", name)):
-                    override[tname] = sh["df"]
-    res = engine.apply_system(s, df, override, toggle_values, run_filter)
+    opts = clean_run_options(options)
+    nw = opts.get("workers")
+    with timer.stage("read"):
+        df, _, used = _read_inputs(s, input_files, nw)
+        override = {}
+        for name, data in mapping_files or []:
+            for sh in read_workbook(data, name):
+                for tname in s["tables"]:
+                    if nk(tname) == nk(sh["sheet"]) or nk(tname) == nk(re.sub(r"\.[^.]+$", "", name)):
+                        override[tname] = sh["df"]
+    res = engine.apply_system(s, df, override, toggle_values, run_filter, timer=timer)
     notes = list(res["notes"])
     if override:
         notes.append("Mapping tables replaced for this run: " + ", ".join(override))
     empty = [c["name"] for d in s["sheets"] for c in d["columns"] if c["kind"] == "empty"]
     if empty:
         notes.append("No formula was found in your sample for: " + ", ".join(dict.fromkeys(empty)) + " - left empty.")
+    parts, pnotes = engine.plan_parts(s, res["sheets"], opts.get("max_rows_per_sheet"))
+    notes += pnotes
     tg = {t["name"]: t.get("value") for t in res["toggles"]}
     rf = engine.clean_run_filter(run_filter)
     summary = [("Run filter", engine.describe_conditions(rf["conditions"], rf["match"]) if rf else "none"),
                ("Toggles used", ", ".join("%s = %s" % kv for kv in tg.items()) or "none"),
+               ("Rows", "%s read, %s written" % (format(res["input_rows"], ","), format(res["rows"], ","))),
                ("Input files", [f"{u['file']} / {u['sheet']} ({u['rows']} rows)" for u in used])]
     if notes:
         summary.append(("Notes", notes))
     tables = engine.tables_to_frames(s, override)
-    data = engine.write_workbook(s, res["sheets"], summary, tables, res["toggles"])
+    winfo: Dict[str, Any] = {}
+    with timer.stage("write"):
+        data = engine.write_workbook(s, res["sheets"], summary, tables, res["toggles"], max_rows=opts.get("max_rows_per_sheet"),
+                                     fast=opts.get("fast_writer"), workers=nw, info=winfo)
     rid = dt.datetime.utcnow().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:4]
-    store.put(f"runs/{sid}/{rid}/output.xlsx", data)
+    with timer.stage("original format"):                 # the input came as csv / xlsm / ...: the output in that format too
+        extras, fnotes = formats.original_outputs(res["sheets"], parts, data, used, f"{_slug(s['name'])}_{rid}")
+    notes += fnotes
+    with timer.stage("save"):
+        store.put(f"runs/{sid}/{rid}/output.xlsx", data)
+        for e in extras:
+            store.put(f"runs/{sid}/{rid}/original/{e['filename']}", e["data"])
     preview = {}
     for sn, item in res["sheets"].items():
-        f = item["df"]
-        preview[sn] = {"rows": int(len(f)), "headers": list(map(str, f.columns)),
+        f = engine.full_frame(item, 0, 25)
+        preview[sn] = {"rows": int(item["n"]), "headers": list(map(str, f.columns)),
                        "kinds": [c["kind"] for c in item["def"]["columns"]],
-                       "data": [[jsonable(v) for v in r] for r in f.head(25).itertuples(index=False, name=None)]}
+                       "data": [[jsonable(v) for v in r] for r in f.itertuples(index=False, name=None)]}
+    split: Dict[str, List[str]] = {}
+    for pn, (sn, _, _) in parts.items():
+        split.setdefault(sn, []).append(pn)
+    timing = timer.report(res["input_rows"], res["rows"], writer=winfo.get("writer"), workers=winfo.get("workers", 1),
+                          tabs=len(parts), output_mb=round(len(data) / 1048576.0, 1))
+    if winfo.get("pool_error"):
+        notes.append("Worker processes were not available (%s); the file was written in one process." % winfo["pool_error"])
     meta = {"run_id": rid, "system": sid, "created": _now(), "rows": int(res["rows"]),
             "input_rows": int(res["input_rows"]), "sheets": {k: v["rows"] for k, v in preview.items()},
-            "notes": notes, "inputs": used, "toggles": res["toggles"], "run_filter": rf,
+            "split": {k: v for k, v in split.items() if len(v) > 1},
+            "extra_outputs": [{"format": e["format"], "filename": e["filename"], "note": e["note"], "mb": round(len(e["data"]) / 1048576.0, 2)}
+                              for e in extras],
+            "notes": notes, "inputs": used, "toggles": res["toggles"], "run_filter": rf, "timing": timing,
             "filename": f"{_slug(s['name'])}_{rid}.xlsx"}
     put_json(store, f"runs/{sid}/{rid}/meta.json", meta)
     return {**meta, "preview": preview}
+
+
+_FRAMES: "OrderedDict[Tuple[str, str], pd.DataFrame]" = OrderedDict()      # the last loaded inputs (at most 2)
+
+
+def _remember(sid: str, token: str, df: pd.DataFrame) -> None:
+    _FRAMES[(sid, token)] = df
+    while len(_FRAMES) > 2:
+        _FRAMES.popitem(last=False)
 
 
 def _stash(store, files: List[Tuple[str, bytes]]) -> str:
@@ -362,7 +434,10 @@ def _unstash(store, token: str) -> List[Tuple[str, bytes]]:
 def preview_filter(store, sid: str, token: str, run_filter: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     """Row counts before/after the filters for an already loaded input (see inspect_input)."""
     s = get_system(store, sid)
-    df, _, _ = _read_inputs(s, _unstash(store, token))
+    df = _FRAMES.get((sid, token))                       # the parsed file stays in memory: a big file is not re-read per keystroke
+    if df is None:
+        df, _, _ = _read_inputs(s, _unstash(store, token))
+        _remember(sid, token, df)
     return engine.preview_counts(s, df, run_filter)
 
 
@@ -371,11 +446,14 @@ def inspect_input(store, sid: str, files: List[Tuple[str, bytes]]) -> Dict[str, 
     s = get_system(store, sid)
     df, _, used = _read_inputs(s, files)
     token = _stash(store, files)
+    _remember(sid, token, df)
     values: Dict[str, List[str]] = {}
     for c in df.columns:
-        vals = sorted({disp(v) for v in df[c] if not is_blank(v)})
-        if 0 < len(vals) <= 30:
-            values[str(c)] = [v[:40] for v in vals]
+        u = df[c].dropna().unique()                      # distinct values first (fast), only then the readable form
+        if 0 < len(u) <= 300:
+            vals = sorted({disp(v) for v in u if not is_blank(v)})
+            if 0 < len(vals) <= 30:
+                values[str(c)] = [v[:40] for v in vals]
     return {"columns": [str(c) for c in df.columns], "rows": int(len(df)), "sheets": used, "values": values, "token": token,
             "preview": engine.preview_counts(s, df, None)}
 
@@ -392,9 +470,17 @@ def list_runs(store, sid: str) -> List[Dict[str, Any]]:
     return out[:30]
 
 
-def get_run_file(store, sid: str, rid: str) -> Tuple[bytes, str]:
-    data = store.get(f"runs/{sid}/{rid}/output.xlsx")
+def get_run_file(store, sid: str, rid: str, extra: Optional[str] = None) -> Tuple[bytes, str]:
+    """The run's .xlsx, or - with ``extra`` = a file name from meta['extra_outputs'] - its output in the input's own format."""
     meta = get_json(store, f"runs/{sid}/{rid}/meta.json") or {}
+    if extra:
+        if extra not in [e["filename"] for e in meta.get("extra_outputs", [])]:
+            raise KeyError("file not found")
+        data = store.get(f"runs/{sid}/{rid}/original/{extra}")
+        if data is None:
+            raise KeyError("file not found")
+        return data, extra
+    data = store.get(f"runs/{sid}/{rid}/output.xlsx")
     if data is None:
         raise KeyError("run not found")
     return data, meta.get("filename", f"{rid}.xlsx")

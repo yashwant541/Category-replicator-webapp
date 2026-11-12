@@ -27,6 +27,7 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 from xml.sax.saxutils import escape
 
+from . import fastxlsx, perf
 from . import rules as R
 from .learn import align, build_tree
 from .rules import cmp_mask, disp, is_blank, nk
@@ -941,33 +942,72 @@ def clean_run_filter(rf: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
 
 
 # ======================================================================= applying it
-def _sheet_frame(d: Dict[str, Any], rows: pd.DataFrame) -> Tuple[pd.DataFrame, List[str]]:
-    """The sheet as it will be written: pasted input values (forced into any locked type) + the sample's formulas
-    filled down (nothing else).  Also returns what could not be read as the locked type."""
-    first = d["origin"]["row"] + 2
-    data: "OrderedDict[str, List[Any]]" = OrderedDict()
+def _input_values(d: Dict[str, Any], rows: pd.DataFrame) -> Tuple[pd.DataFrame, List[str]]:
+    """The pasted part of a sheet: its input columns, forced into any locked type (nothing else is stored - the formulas are
+    generated while writing).  Also returns what could not be read as the locked type."""
+    data: "OrderedDict[str, Any]" = OrderedDict()
     n = len(rows)
     issues: List[str] = []
     for c in d["columns"]:
+        if c["kind"] != "input":
+            continue
+        vals = rows[c["source"]].tolist() if c["source"] in rows.columns else [None] * n
+        if c.get("dtype"):
+            out, bad = [], []
+            for v in vals:
+                x, ok = coerce_value(v, c["dtype"])
+                out.append(x)
+                if not ok:
+                    bad.append(v)
+            vals = out
+            if bad:
+                issues.append("Sheet '%s', column '%s': %d value(s) could not be read as %s and were left empty (e.g. %s)."
+                              % (d["name"], c["name"], len(bad), _TYPE_LABEL[c["dtype"]["type"]], ", ".join(map(lambda x: repr(disp(x)), bad[:3]))))
+        data[c["name"]] = vals
+    return pd.DataFrame(data, columns=list(data), index=range(n), dtype=object), issues
+
+
+def compile_formula(f: str, from_row: int) -> Tuple[List[str], List[int], int]:
+    """``shift_formula`` prepared once per column: text pieces + the movable row numbers, so each row is a cheap join
+    (fastxlsx.fill_formula gives exactly shift_formula(f, from_row, row))."""
+    texts: List[str] = []
+    nums: List[int] = []
+    cur: List[str] = []
+    for i, p in enumerate(_LITERALS.split(f or "")):
+        if i % 2:                                   # a "text" / 'Sheet name' literal: never touched
+            cur.append(p)
+            continue
+        pos = 0
+        for m in _REF.finditer(p):
+            if m.group(3) == "$":                   # row anchored: stays
+                continue
+            cur.append(p[pos:m.start()] + m.group(1) + m.group(2))
+            texts.append("".join(cur))
+            cur = []
+            nums.append(int(m.group(4)))
+            pos = m.end()
+        cur.append(p[pos:])
+    texts.append("".join(cur))
+    return texts, nums, from_row
+
+
+def full_frame(item: Dict[str, Any], a: int = 0, b: Optional[int] = None) -> pd.DataFrame:
+    """Rows a..b of a sheet exactly as written: pasted values + the sample's formulas filled down from the first data row.
+"""
+    d, v = item["def"], item["values"]
+    b = item["n"] if b is None else min(b, item["n"])
+    n = max(0, b - a)
+    first = d["origin"]["row"] + 2
+    data: "OrderedDict[str, List[Any]]" = OrderedDict()
+    for c in d["columns"]:
         if c["kind"] == "input":
-            vals = list(rows[c["source"]]) if c["source"] in rows.columns else [None] * n
-            if c.get("dtype"):
-                out, bad = [], []
-                for v in vals:
-                    x, ok = coerce_value(v, c["dtype"])
-                    out.append(x)
-                    if not ok:
-                        bad.append(v)
-                vals = out
-                if bad:
-                    issues.append("Sheet '%s', column '%s': %d value(s) could not be read as %s and were left empty (e.g. %s)."
-                                  % (d["name"], c["name"], len(bad), _TYPE_LABEL[c["dtype"]["type"]], ", ".join(map(lambda x: repr(disp(x)), bad[:3]))))
-            data[c["name"]] = vals
+            data[c["name"]] = v[c["name"]].iloc[a:b].tolist()
         elif c["kind"] == "formula":
-            data[c["name"]] = [shift_formula(c["raw"], c["sample_row"], first + i) for i in range(n)]
+            cf = compile_formula(c["raw"], c["sample_row"])
+            data[c["name"]] = [fastxlsx.fill_formula(cf, first + i) for i in range(n)]
         else:
             data[c["name"]] = [None] * n
-    return pd.DataFrame(data, columns=[c["name"] for c in d["columns"]], dtype=object), issues
+    return pd.DataFrame(data, columns=[c["name"] for c in d["columns"]], index=range(n), dtype=object)
 
 
 def filter_stages(system: Dict[str, Any], df_in: pd.DataFrame, run_filter: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -1022,65 +1062,149 @@ def preview_counts(system: Dict[str, Any], df_in: pd.DataFrame, run_filter: Opti
 def apply_system(system: Dict[str, Any], df_in: pd.DataFrame,
                  table_override: Optional[Dict[str, pd.DataFrame]] = None,
                  toggle_override: Optional[Dict[str, str]] = None,
-                 run_filter: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    st = filter_stages(system, df_in, run_filter)
+                 run_filter: Optional[Dict[str, Any]] = None, timer: Optional[perf.Timer] = None) -> Dict[str, Any]:
+    with perf.stage(timer, "filter"):
+        st = filter_stages(system, df_in, run_filter)
     df, notes, n_in = st["df"], st["notes"], st["input_rows"]
     frames = tables_to_frames(system, table_override)
     toggles_now = effective_toggles(system, frames, toggle_override)
-    rows, snotes = split_frames(system, df, df)
-    notes += snotes
-    defs = {s["name"]: s for s in system["sheets"]}
-    sheets: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
-    for name, rdf in rows.items():
-        d = defs.get(name)
-        if d is None:
-            d = system["sheets"][0]
-            notes.append(f"Sheet '{name}' is new: laid out like '{d['name']}'.")
-        fr, issues = _sheet_frame(d, rdf.reset_index(drop=True))
-        notes += issues
-        sheets[name] = {"df": fr, "def": d}
+    with perf.stage(timer, "build"):
+        rows, snotes = split_frames(system, df, df)
+        notes += snotes
+        defs = {s["name"]: s for s in system["sheets"]}
+        sheets: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
+        for name, rdf in rows.items():
+            d = defs.get(name)
+            if d is None:
+                d = system["sheets"][0]
+                notes.append(f"Sheet '{name}' is new: laid out like '{d['name']}'.")
+            vals, issues = _input_values(d, rdf.reset_index(drop=True))
+            notes += issues
+            sheets[name] = {"values": vals, "def": d, "n": int(len(vals))}
     return {"sheets": sheets, "notes": notes, "toggles": toggles_now, "input_rows": n_in,
-            "rows": int(sum(len(v["df"]) for v in sheets.values()))}
+            "rows": int(sum(v["n"] for v in sheets.values()))}
 
 
 # ================================================================ the output workbook
+def plan_parts(system: Dict[str, Any], sheets: "OrderedDict[str, Dict[str, Any]]", max_rows: Optional[int] = None
+               ) -> Tuple["OrderedDict[str, Tuple[str, int, int]]", List[str]]:
+    """Which workbook tab holds which rows: part name -> (sheet, from row, to row).  A sheet with more rows than fit on one
+    tab continues on 'Name (2)', 'Name (3)' ...  (the limit is Excel's, or the lower one the user set)."""
+    limit = int(max_rows or system.get("output", {}).get("max_rows_per_sheet") or perf.rows_per_sheet())
+    taken = set(sheets) | {"Run summary"}
+    parts: "OrderedDict[str, Tuple[str, int, int]]" = OrderedDict()
+    notes: List[str] = []
+    for name, item in sheets.items():
+        cap = max(1, min(limit, perf.EXCEL_MAX_ROWS - (item["def"]["origin"]["row"] + 1)))
+        n = item["n"]
+        k = max(1, -(-n // cap))
+        for i in range(k):
+            if i == 0:
+                pn = name
+            else:
+                suf = " (%d)" % (i + 1)
+                pn = safe_sheet_name(name[:31 - len(suf)] + suf, taken)
+            parts[pn] = (name, i * cap, min(n, (i + 1) * cap))
+        if k > 1:
+            notes.append("Sheet '%s' has %s rows: it continues on %d more tab(s) (%s), at most %s rows per tab."
+                         % (name, format(n, ","), k - 1, ", ".join(list(parts)[-(k - 1):]), format(cap, ",")))
+    return parts, notes
+
+
+def _table_rows(system: Dict[str, Any], t: str, T: pd.DataFrame, toggles: List[Dict[str, Any]]):
+    """A mapping / toggle sheet as plain rows -> (rows, 1-based row to make bold or None)."""
+    spec = system.get("tables", {}).get(t, {})
+    if spec.get("grid"):                          # Toggle sheet: exact cell layout, current switch values
+        grid = [list(r) for r in spec["grid"]]
+        for tg in toggles:
+            if tg.get("cell") and nk(tg.get("sheet", "")) == nk(t) and tg.get("value"):
+                r, c = _cell_addr(tg["cell"])
+                if r < len(grid) and c < len(grid[r]):
+                    grid[r][c] = _like(grid[r][c], tg["value"])
+        return ([[xl_val(v) for v in row] for row in grid], None)
+    pad = [None] * int(spec.get("col_offset", 0))
+    hr0 = int(spec.get("header_row", 0))
+    rows: Any = [[] for _ in range(hr0)] + [pad + [str(c) for c in T.columns]]
+    rows = rows + [pad + [xl_val(v) for v in row] for row in T.itertuples(index=False, name=None)]
+    return rows, hr0 + 1
+
+
 def _write_tables(wb, system, tables, toggles, table_sheet):
     for t, sn in table_sheet.items():
         ws = wb.create_sheet(sn)
-        T = tables[t]
-        spec = system.get("tables", {}).get(t, {})
-        if spec.get("grid"):                          # Toggle sheet: exact cell layout, current switch values
-            grid = [list(r) for r in spec["grid"]]
-            for tg in toggles:
-                if tg.get("cell") and nk(tg.get("sheet", "")) == nk(t) and tg.get("value"):
-                    r, c = _cell_addr(tg["cell"])
-                    if r < len(grid) and c < len(grid[r]):
-                        grid[r][c] = _like(grid[r][c], tg["value"])
-            for row in grid:
-                ws.append([xl_val(v) for v in row])
-            continue
-        pad = [None] * int(spec.get("col_offset", 0))
-        for _ in range(int(spec.get("header_row", 0))):
-            ws.append([])
-        hr = int(spec.get("header_row", 0)) + 1
-        ws.append(pad + [str(c) for c in T.columns])
-        for row in T.itertuples(index=False, name=None):
-            ws.append(pad + [xl_val(v) for v in row])
-        for j in range(len(pad) + 1, len(pad) + T.shape[1] + 1):
-            ws.cell(row=hr, column=j).font = Font(bold=True)
+        rows, bold = _table_rows(system, t, tables[t], toggles)
+        for row in rows:
+            ws.append(row)
+        if bold:
+            for j in range(1, len(rows[bold - 1]) + 1):
+                if rows[bold - 1][j - 1] is not None:
+                    ws.cell(row=bold, column=j).font = Font(bold=True)
+
+
+def _table_sheet_names(system, tables, toggles, taken: set) -> Dict[str, str]:
+    """Mapping and toggle sheets are dependencies of the formulas: they always come along."""
+    dependent: List[str] = list(tables)
+    dependent += [tg["sheet"] for tg in toggles if tg.get("sheet")]
+    for s in system["sheets"]:
+        for c in s["columns"]:
+            if c["kind"] == "formula":
+                dependent += [(m.group(1) or m.group(2)).replace("''", "'") for m in _SHEET_REFS.finditer(c["raw"])]
+    table_sheet: Dict[str, str] = {}
+    for t in dict.fromkeys(dependent):
+        t = next((n for n in tables if nk(n) == nk(t)), None)
+        if t is not None and t not in table_sheet:
+            table_sheet[t] = safe_sheet_name(t, taken)
+    return table_sheet
+
+
+def _summary_rows(system, parts, summary) -> List[List[Any]]:
+    rows: List[List[Any]] = [["System", system["name"]], ["Generated", dt.datetime.now().strftime("%Y-%m-%d %H:%M")], [],
+                             ["Sheet", "Rows"]]
+    for pname, (_, a, b) in parts.items():
+        rows.append([pname, int(b - a)])
+    if summary:
+        rows.append([])
+        for k, v in summary:
+            rows.append([k, v if not isinstance(v, (list, dict)) else "; ".join(map(str, v))])
+    return rows
 
 
 def write_workbook(system: Dict[str, Any], sheets: "OrderedDict[str, Dict[str, Any]]",
                    summary: Optional[List[Tuple[str, Any]]] = None,
                    tables: Optional[Dict[str, pd.DataFrame]] = None,
-                   toggles: Optional[List[Dict[str, Any]]] = None) -> bytes:
-    wb = openpyxl.Workbook()
-    wb.remove(wb.active)
+                   toggles: Optional[List[Dict[str, Any]]] = None,
+                   max_rows: Optional[int] = None, fast: Optional[bool] = None, workers: Optional[int] = None,
+                   info: Optional[Dict[str, Any]] = None) -> bytes:
+    """The output workbook.  ``fast`` None = decide by size: big outputs use the streaming multi-process writer
+    (fastxlsx), small ones openpyxl.  ``info`` (optional dict) receives how it was written."""
     tables = tables if tables is not None else tables_to_frames(system)
     toggles = toggles if toggles is not None else system.get("toggles", [])
-    for sname, item in sheets.items():
-        df, d = item["df"], item["def"]
-        ws = wb.create_sheet(sname)
+    parts, _ = plan_parts(system, sheets, max_rows)
+    total = sum(b - a for _, a, b in parts.values())
+    use_fast = (total >= perf.fast_write_rows()) if fast is None else bool(fast)
+    info = info if info is not None else {}
+    info.update(writer="fast" if use_fast else "openpyxl", parts=len(parts))
+    if use_fast:
+        n = perf.workers() if workers is None else max(1, int(workers))
+        pool = perf.make_pool(n) if total >= perf.parallel_min_rows() or workers else None
+        info["workers"] = n if pool is not None else 1
+        try:
+            return _write_fast(system, sheets, parts, summary, tables, toggles, pool)
+        except Exception as exc:  # noqa: BLE001 - a broken pool must not lose the run: do it again in this process
+            if pool is None:
+                raise
+            info.update(workers=1, pool_error=str(exc)[:200])
+            return _write_fast(system, sheets, parts, summary, tables, toggles, None)
+        finally:
+            if pool is not None:
+                pool.shutdown(wait=False)
+    wb = openpyxl.Workbook()
+    wb.remove(wb.active)
+    for pname, (sname, a, b) in parts.items():
+        item = sheets[sname]
+        d = item["def"]
+        df = full_frame(item, a, b)
+        ws = wb.create_sheet(pname)
         hr = int(d["origin"]["row"])
         for c, name in zip(d["columns"], df.columns):          # same cells as the sample
             cell = ws.cell(row=hr + 1, column=c["col"] + 1, value=name)
@@ -1101,36 +1225,60 @@ def write_workbook(system: Dict[str, Any], sheets: "OrderedDict[str, Dict[str, A
                 ws.cell(row=p["row"] + 1, column=p["col"] + 1, value=xl_val(p["value"]))
         ws.freeze_panes = ws.cell(row=hr + 2, column=1).coordinate
 
-    # mapping and toggle sheets are dependencies of the formulas: always part of the output workbook
-    taken = set(sheets.keys()) | {"Run summary"}
-    dependent: List[str] = list(tables)                 # every mapping + toggle sheet of the system comes along
-    dependent += [tg["sheet"] for tg in toggles if tg.get("sheet")]
-    for s in system["sheets"]:
-        for c in s["columns"]:
-            if c["kind"] == "formula":
-                dependent += [(m.group(1) or m.group(2)).replace("''", "'") for m in _SHEET_REFS.finditer(c["raw"])]
-    table_sheet: Dict[str, str] = {}
-    for t in dict.fromkeys(dependent):
-        t = next((n for n in tables if nk(n) == nk(t)), None)
-        if t is not None and t not in table_sheet:
-            table_sheet[t] = safe_sheet_name(t, taken)
+    taken = set(parts) | {"Run summary"}
+    table_sheet = _table_sheet_names(system, tables, toggles, taken)
     _write_tables(wb, system, tables, toggles, table_sheet)
 
     sm = wb.create_sheet("Run summary")
-    sm.append(["System", system["name"]])
-    sm.append(["Generated", dt.datetime.now().strftime("%Y-%m-%d %H:%M")])
-    sm.append([])
-    sm.append(["Sheet", "Rows"])
+    for i, row in enumerate(_summary_rows(system, parts, summary), start=1):
+        sm.append(row)
     for c in sm[4]:
         c.font = Font(bold=True)
-    for sname, item in sheets.items():
-        sm.append([sname, int(len(item["df"]))])
-    if summary:
-        sm.append([])
-        for k, v in summary:
-            sm.append([k, v if not isinstance(v, (list, dict)) else "; ".join(map(str, v))])
     sm.column_dimensions["A"].width = 30
     sm.column_dimensions["B"].width = 90
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
+
+
+def _write_fast(system, sheets, parts, summary, tables, toggles, pool) -> bytes:
+    """Same workbook as the openpyxl path, written by fastxlsx (streamed, rows encoded by worker processes)."""
+    S = fastxlsx.Styles()
+    date_styles = (S.xf(fmt="yyyy-mm-dd"), S.xf(fmt="yyyy-mm-dd hh:mm:ss"))
+    bold = S.xf(font=S.BOLD)
+    specs: List[Dict[str, Any]] = []
+    for pname, (sname, a, b) in parts.items():
+        item = sheets[sname]
+        d = item["def"]
+        hr = int(d["origin"]["row"])
+        head: Dict[int, Dict[int, Tuple[Any, int]]] = {}
+        widths: Dict[int, float] = {}
+        plan: List[tuple] = []
+        vnames: List[str] = []
+        for c in d["columns"]:
+            hs = S.xf(font=S.WHITE_BOLD, fill=S.FILL_FORMULA if c["kind"] == "formula" else S.FILL_INPUT, wrap=True)
+            head.setdefault(hr + 1, {})[c["col"]] = (c["name"], hs)
+            widths[c["col"]] = max(9, min(40, len(str(c["name"])) + 3))
+            style = S.xf(fmt=number_format_for(c.get("dtype"), c["kind"]))
+            if c["kind"] == "input":
+                plan.append((c["col"], "v", len(vnames), style))
+                vnames.append(c["name"])
+            elif c["kind"] == "formula":
+                plan.append((c["col"], "f", compile_formula(c["raw"], c["sample_row"]), style))
+        for p in d.get("params", []):                          # parameter cell(s) the formulas point at ($G$1 ...)
+            if p.get("value") is not None:
+                head.setdefault(p["row"] + 1, {})[p["col"]] = (xl_val(p["value"]), 0)
+        plan.sort(key=lambda t: t[0])
+        cols = [item["values"][nm].iloc[a:b].tolist() for nm in vnames]
+        specs.append({"name": pname, "widths": widths, "freeze": hr + 2, "head": head,
+                      "data": {"first": hr + 2, "n": int(b - a), "values": cols, "plan": plan}})
+    taken = set(parts) | {"Run summary"}
+    for t, sn in _table_sheet_names(system, tables, toggles, taken).items():
+        rows, bold_row = _table_rows(system, t, tables[t], toggles)
+        specs.append({"name": sn, "static": (
+            (i, [(c0, v, bold if i == bold_row else 0) for c0, v in enumerate(row) if v is not None])
+            for i, row in enumerate(rows, start=1))})
+    srows = _summary_rows(system, parts, summary)
+    specs.append({"name": "Run summary", "widths": {0: 30, 1: 90}, "static": (
+        (i, [(c0, v, bold if i == 4 else 0) for c0, v in enumerate(row) if v is not None]) for i, row in enumerate(srows, start=1))})
+    return fastxlsx.write_package(specs, S, date_styles, pool=pool)

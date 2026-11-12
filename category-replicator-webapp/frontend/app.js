@@ -116,6 +116,18 @@
   }
   const stripSrc = list => list.map(c => c.conditions ? { match: c.match, conditions: stripSrc(c.conditions) } : { col: c.col, op: c.op, value: c.value });
 
+  const ACCEPT = ".xlsx,.xlsm,.xlsb,.xls,.xltx,.xltm,.ods,.csv,.tsv,.txt,.gz,.parquet";
+  const fmtN = n => Number(n || 0).toLocaleString("en-US");
+  const fmtSec = x => x < 60 ? x.toFixed(1) + " s" : Math.floor(x / 60) + " min " + String(Math.round(x % 60)).padStart(2, "0") + " s";
+  // "Processed 1,200,000 rows in 38.2 s (31,400 rows/s) - read 6.1 s · filter 0.4 s · ..."
+  function timingLine(t) {
+    if (!t) return null;
+    const st = Object.keys(t.stages || {}).map(k => k + " " + fmtSec(t.stages[k])).join(" · ");
+    return "Processed " + fmtN(Math.max(t.rows_in, t.rows_out)) + " rows in " + fmtSec(t.seconds) + " (" + fmtN(t.rows_per_sec) + " rows/s)"
+      + (t.workers > 1 ? " with " + t.workers + " worker processes" : "") + (t.writer === "fast" ? ", streaming writer" : "")
+      + (t.output_mb ? " · file " + t.output_mb + " MB" : "") + (st ? "   [" + st + "]" : "");
+  }
+
   function dl(url) { const a = document.createElement("a"); a.href = API + url; a.click(); }
 
   /* ================================================================ routing */
@@ -211,7 +223,7 @@
   }
 
   function dropZone(hint, title, sub) {
-    const inp = h("input", { type: "file", multiple: true, accept: ".xlsx,.xlsm,.xls,.csv" });
+    const inp = h("input", { type: "file", multiple: true, accept: ACCEPT });
     const z = h("label", { class: "drop" }, [h("div", { text: "Drop files or click to browse" }), h("div", { class: "small", text: sub }), inp]);
     inp.addEventListener("change", () => uploadFiles(inp.files, hint));
     z.addEventListener("dragover", e => { e.preventDefault(); z.classList.add("over"); });
@@ -585,7 +597,7 @@
     function zone(key, title, sub, multiple) {
       const list = h("div", { class: "small muted", style: "margin-top:6px" });
       const refresh = () => { list.textContent = files[key].map(f => f.name).join(", "); };
-      const inp = h("input", { type: "file", ...(multiple ? { multiple: true } : {}), accept: ".xlsx,.xlsm,.xls,.csv" });
+      const inp = h("input", { type: "file", ...(multiple ? { multiple: true } : {}), accept: ACCEPT });
       const set = fl => { files[key] = Array.prototype.slice.call(fl); refresh(); if (key === "in") onInput(); };
       inp.addEventListener("change", () => set(inp.files));
       const z = h("label", { class: "drop" }, [h("div", { text: sub }), inp]);
@@ -672,12 +684,19 @@
     }
     drawFilter();
     const out = h("div", {});
+    const bigOpt = { rows: h("input", { type: "number", class: "inl", min: 1, placeholder: "system setting", style: "width:130px" }),
+      workers: h("input", { type: "number", class: "inl", min: 1, max: 64, placeholder: "automatic", style: "width:100px" }) };
+    const bigBox = h("details", { style: "margin-top:12px" }, [h("summary", { class: "small", text: "Large data options (optional)" }),
+      h("div", { class: "row small", style: "margin-top:8px" }, [h("span", { text: "Rows per output tab" }), bigOpt.rows, h("span", { text: "Worker processes" }), bigOpt.workers]),
+      h("div", { class: "muted small", text: "A sheet with more rows than fit on one tab continues on 'Name (2)', 'Name (3)'… (Excel's limit is 1,048,576 rows per tab). Big files are read and written by several worker processes at the same time." })]);
     const btn = h("button", { class: "btn", text: "Run", onclick: async () => {
       if (!files.in.length) return toast("Add at least one input file", true);
       const fd = new FormData();
       files.in.forEach(f => fd.append("files", f)); files.map.forEach(f => fd.append("mappings", f));
       if (Object.keys(tog).length) fd.append("toggles", JSON.stringify(tog));
       if (active().length) fd.append("filters", JSON.stringify({ match: rf.match, conditions: active() }));
+      const opt = {}; if (String(bigOpt.rows.value).trim()) opt.max_rows_per_sheet = bigOpt.rows.value; if (String(bigOpt.workers.value).trim()) opt.workers = bigOpt.workers.value;
+      if (Object.keys(opt).length) fd.append("options", JSON.stringify(opt));
       btn.disabled = true; btn.textContent = "Running…";
       try { LAST_RUN = (await call("/api/systems/" + s.id + "/run", { method: "POST", body: fd })).run; showRun(out, LAST_RUN); }
       catch (e) { toast(e.message, true); }
@@ -689,6 +708,7 @@
         zone("map", "Updated mappings / toggles (optional)", "Replace the stored mapping or Toggle sheets for this run", true)]),
       filterBox,
       togBox,
+      bigBox,
       h("div", { class: "row", style: "margin-top:14px" }, [
         h("span", { class: "muted small", text: "The output holds your sample's formulas; Excel calculates them when the file is opened." }),
         h("span", { class: "spacer" }), btn])]));
@@ -700,10 +720,17 @@
     clear(box);
     const card = h("div", { class: "card" }, [h("div", { class: "row" }, [h("h2", { text: "Result", style: "margin:0" }), h("span", { class: "spacer" }),
       h("button", { class: "btn", text: "Download .xlsx", onclick: () => dl("/api/systems/" + run.system + "/runs/" + run.run_id + "/download") })]),
-      h("div", { class: "stat", style: "margin-top:12px" }, [h("div", {}, [h("b", { text: run.input_rows }), h("span", { text: "input rows" })]),
-        h("div", {}, [h("b", { text: run.rows }), h("span", { text: "output rows" })]),
+      h("div", { class: "stat", style: "margin-top:12px" }, [h("div", {}, [h("b", { text: fmtN(run.input_rows) }), h("span", { text: "input rows" })]),
+        h("div", {}, [h("b", { text: fmtN(run.rows) }), h("span", { text: "output rows" })]),
+        run.timing ? h("div", {}, [h("b", { text: fmtSec(run.timing.seconds) }), h("span", { text: "total time" })]) : null,
         h("div", {}, [h("b", { text: Object.keys(run.sheets).length }), h("span", { text: "sheet(s)" })]),
 ])]);
+    const tl = timingLine(run.timing);
+    if (tl) card.appendChild(h("div", { class: "note good", text: tl }));
+    if (run.split && Object.keys(run.split).length) card.appendChild(h("div", { class: "note", text: "Split over several tabs: " + Object.keys(run.split).map(k => k + " → " + run.split[k].join(", ")).join("; ") }));
+    (run.extra_outputs || []).forEach(e => card.appendChild(h("div", { class: "note good" }, [h("b", { text: "Also in your input's format (" + e.format + "): " }),
+      h("button", { class: "btn small", text: "Download " + e.filename, onclick: () => dl("/api/systems/" + run.system + "/runs/" + run.run_id + "/download?file=" + encodeURIComponent(e.filename)) }),
+      h("span", { class: "muted small", text: "  " + e.note })])));
     if ((run.toggles || []).length) card.appendChild(h("div", { class: "note good", text: "Toggles used: " + run.toggles.map(t => t.name + " = " + t.value).join(", ") }));
     (run.notes || []).forEach(n => card.appendChild(h("div", { class: "note", text: n })));
     Object.keys(run.rule_errors || {}).forEach(k => card.appendChild(h("div", { class: "note err", text: k + ": " + run.rule_errors[k] })));
@@ -770,6 +797,11 @@
           h("input", { type: "text", class: "inl", value: sp.rest_sheet || "", placeholder: "e.g. Other", oninput: e => { sp.rest_sheet = e.target.value; } })]));
       }
       body.appendChild(card);
+      const lim = h("input", { type: "number", class: "inl", min: 1, max: 1048575, style: "width:140px", placeholder: "1,000,000", value: (SYS.output || {}).max_rows_per_sheet || "" });
+      body.appendChild(h("div", { class: "card" }, [h("h2", { text: "Large outputs" }),
+        h("div", { class: "muted small", text: "When an output sheet has more rows than this, it continues on new tabs (Name (2), Name (3)…), each with its header and the formulas filled down from its first row. Excel allows at most 1,048,576 rows on one tab; the default is 1,000,000." }),
+        h("div", { class: "row", style: "margin-top:8px" }, [h("span", { text: "Rows per tab" }), lim, h("button", { class: "btn ghost small", text: "Save limit", onclick: async () => {
+          try { await saveSystem({ max_rows_per_sheet: lim.value }, "Limit saved"); } catch (e) { toast(e.message, true); } } })])]));
       body.appendChild(h("div", { class: "row" }, [h("span", { class: "spacer" }), h("button", { class: "btn", text: "Save filters", onclick: async () => {
         F.pre = stripSrc(pruneConds(F.pre, false));
         ((F.split || {}).sheets || []).forEach(sh => { sh.conditions = stripSrc(pruneConds(sh.conditions, false)); });
@@ -804,10 +836,11 @@
       const r = await call("/api/systems/" + SYS.id + "/runs");
       clear(body);
       if (!r.runs.length) { body.appendChild(h("div", { class: "card empty", text: "No runs yet." })); return; }
-      body.appendChild(h("div", { class: "card" }, [h("table", { class: "t" }, [h("thead", {}, [h("tr", {}, ["When (UTC)", "Inputs", "Rows in → out", "Sheets", ""].map(x => h("th", { text: x })))]),
+      body.appendChild(h("div", { class: "card" }, [h("table", { class: "t" }, [h("thead", {}, [h("tr", {}, ["When (UTC)", "Inputs", "Rows in → out", "Time", "Sheets", ""].map(x => h("th", { text: x })))]),
         h("tbody", {}, r.runs.map(m => h("tr", {}, [h("td", { text: when(m.created) }), h("td", { class: "small", text: (m.inputs || []).map(i => i.file).join(", ") }),
-          h("td", { text: m.input_rows + " → " + m.rows }), h("td", { class: "small", text: Object.keys(m.sheets).join(", ") }),
-          h("td", {}, [h("button", { class: "btn ghost small", text: "Download", onclick: () => dl("/api/systems/" + SYS.id + "/runs/" + m.run_id + "/download") })])])))])]));
+          h("td", { text: fmtN(m.input_rows) + " → " + fmtN(m.rows) }), h("td", { class: "small", text: m.timing ? fmtSec(m.timing.seconds) + " (" + fmtN(m.timing.rows_per_sec) + " rows/s)" : "" }), h("td", { class: "small", text: Object.keys(m.sheets).join(", ") }),
+          h("td", {}, [h("button", { class: "btn ghost small", text: "Download", onclick: () => dl("/api/systems/" + SYS.id + "/runs/" + m.run_id + "/download") }),
+            ...(m.extra_outputs || []).map(e => h("button", { class: "btn ghost small", text: e.format, title: e.filename, onclick: () => dl("/api/systems/" + SYS.id + "/runs/" + m.run_id + "/download?file=" + encodeURIComponent(e.filename)) }))])])))])]));
     } catch (e) { clear(body).appendChild(h("div", { class: "note err", text: e.message })); }
   }
 

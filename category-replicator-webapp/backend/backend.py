@@ -13,6 +13,7 @@ Storage: one managed folder whose id is the project variable ``REPLICATOR_FOLDER
 from __future__ import annotations
 
 import io
+import os
 import traceback
 from functools import wraps
 
@@ -33,7 +34,7 @@ except NameError:  # pragma: no cover
 REPLICATOR_FOLDER = ""
 
 _STORE = None
-_MAX_UPLOAD = 200 * 1024 * 1024
+_MAX_UPLOAD = int(os.environ.get("REPLICATOR_MAX_UPLOAD_MB", "2000")) * 1024 * 1024     # per file; big inputs are expected
 
 
 def store():
@@ -183,7 +184,11 @@ def api_run(sid):
         rf = _json.loads(request.form.get("filters") or "null")
     except ValueError:
         raise ValueError("The run filter is not valid JSON")
-    res = service.run_system(store(), sid, inputs, _files("mappings"), tv or None, rf)
+    try:
+        opts = _json.loads(request.form.get("options") or "null")
+    except ValueError:
+        raise ValueError("The run options are not valid JSON")
+    res = service.run_system(store(), sid, inputs, _files("mappings"), tv or None, rf, opts)
     return ok(run=res)
 
 
@@ -212,8 +217,9 @@ def api_runs(sid):
 @app.route("/api/systems/<sid>/runs/<rid>/download", methods=["GET"])
 @guarded
 def api_run_download(sid, rid):
-    data, name = service.get_run_file(store(), sid, rid)
-    return _download(data, name)
+    data, name = service.get_run_file(store(), sid, rid, request.args.get("file"))
+    return _download(data, name, "application/octet-stream" if request.args.get("file") else
+                     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 
 @app.route("/api/systems/<sid>/template", methods=["GET"])
