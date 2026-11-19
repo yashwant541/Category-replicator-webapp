@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import io
 import os
+import shutil
+import tempfile
 import traceback
 from functools import wraps
 
@@ -33,6 +35,10 @@ except NameError:  # pragma: no cover
 # Put the folder's name or id here. If left empty, the project variable REPLICATOR_FOLDER is used.
 REPLICATOR_FOLDER = ""
 
+# ---- HEAVY FILE MODE: two more managed folders (name or id). Leave empty to use sub-folders of the folder above.
+UPLOAD_FOLDER = ""      # where big input files are uploaded to (and run from)
+DOWNLOAD_FOLDER = ""    # where the outputs of heavy runs are written for download
+
 _STORE = None
 _MAX_UPLOAD = int(os.environ.get("REPLICATOR_MAX_UPLOAD_MB", "2000")) * 1024 * 1024     # per file; big inputs are expected
 
@@ -47,7 +53,22 @@ def store():
             if REPLICATOR_FOLDER:
                 os.environ["REPLICATOR_FOLDER"] = REPLICATOR_FOLDER
             _STORE = make_store()
+        _setup_heavy(_STORE)
     return _STORE
+
+
+def _setup_heavy(main):
+    """Point the service at the upload / download folders (separate managed folders, or sub-folders of the main one)."""
+    def pick(folder, sub):
+        if folder:
+            st = make_store(folder)
+            if type(st).__name__ == "DataikuStore":      # its own managed folder: files sit at its root
+                return st, ""
+            return st, sub                                  # local development: a sub-folder of the local store
+        return main, sub
+    up, upp = pick(UPLOAD_FOLDER, "heavy_uploads")
+    down, downp = pick(DOWNLOAD_FOLDER, "heavy_downloads")
+    service.configure_heavy(up, upp, down, downp)
 
 
 def ok(**kw):
@@ -173,7 +194,8 @@ def api_relearn(sid):
 @guarded
 def api_run(sid):
     inputs = _files("files")
-    if not inputs:
+    inbox, token = _inbox_and_token()
+    if not inputs and not inbox and not token:
         raise ValueError("Upload at least one input file.")
     import json as _json
     try:
@@ -188,17 +210,106 @@ def api_run(sid):
         opts = _json.loads(request.form.get("options") or "null")
     except ValueError:
         raise ValueError("The run options are not valid JSON")
-    res = service.run_system(store(), sid, inputs, _files("mappings"), tv or None, rf, opts)
-    return ok(run=res)
+    maps = _files("mappings")
+    st = store()
+    # a big run is a background job (the request would be cut by the proxy long before it ends); poll /api/jobs/<id>
+    heavy = request.form.get("heavy") == "1"
+    jid = service.start_job("run", lambda progress: service.run_system(
+        st, sid, service.resolve_inputs(st, inputs, inbox, token), maps, tv or None, rf, opts, progress=progress, heavy=heavy))
+    return ok(job_id=jid)
+
+
+def _inbox_and_token():
+    import json as _json
+    try:
+        inbox = [str(x) for x in (_json.loads(request.form.get("inbox") or "[]") or [])]
+    except ValueError:
+        raise ValueError("The inbox list is not valid JSON")
+    return inbox, (request.form.get("token") or "").strip() or None
+
+
+# ---- heavy-file mode: upload (in chunks), list, delete, clear; downloads likewise
+_CHUNK_ROOT = os.path.join(tempfile.gettempdir(), "replicator_chunks")
+
+
+@app.route("/api/heavy/<area>", methods=["GET"])
+@guarded
+def api_heavy_list(area):
+    return ok(files=service.list_area(store(), area))
+
+
+@app.route("/api/heavy/upload", methods=["POST"])
+@guarded
+def api_heavy_upload():
+    """One chunk of a big file (raw request body). Chunks are put together on the server and stored in the upload folder;
+    a browser never has to send 500 MB in a single request."""
+    import re
+    name = service._safe_name(request.args.get("name", ""))
+    uid = request.args.get("id", "")
+    if not re.fullmatch(r"[A-Za-z0-9_-]{6,64}", uid):
+        raise ValueError("Bad upload id.")
+    index, total = int(request.args.get("index", "0")), int(request.args.get("total", "1"))
+    if not 0 <= index < total <= 20000:
+        raise ValueError("Bad chunk number.")
+    store()                                                   # make sure the folders are configured
+    d = os.path.join(_CHUNK_ROOT, uid)
+    os.makedirs(d, exist_ok=True)
+    with open(os.path.join(d, "%06d" % index), "wb") as fh:
+        fh.write(request.get_data())
+    if index < total - 1:
+        return ok(done=False, index=index)
+    parts = sorted(os.listdir(d))
+    if len(parts) != total:
+        raise ValueError("A chunk is missing (%d of %d arrived). Upload the file again." % (len(parts), total))
+    whole = os.path.join(d, "whole")
+    with open(whole, "wb") as out:
+        for part in parts:
+            with open(os.path.join(d, part), "rb") as fh:
+                shutil.copyfileobj(fh, out, 8 * 1024 * 1024)
+    try:
+        service.area_put_file(store(), "uploads", name, whole)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+    return ok(done=True, name=name)
+
+
+@app.route("/api/heavy/<area>/delete", methods=["POST"])
+@guarded
+def api_heavy_delete(area):
+    names = (request.get_json(silent=True) or {}).get("names") or []
+    return ok(deleted=service.area_delete(store(), area, [str(n) for n in names]))
+
+
+@app.route("/api/heavy/<area>/clear", methods=["POST"])
+@guarded
+def api_heavy_clear(area):
+    return ok(deleted=service.area_clear(store(), area))
+
+
+@app.route("/api/heavy/downloads/file", methods=["GET"])
+@guarded
+def api_heavy_download():
+    name = request.args.get("name", "")
+    return _download(service.area_get(store(), "downloads", name), name, "application/octet-stream")
+
+
+@app.route("/api/jobs/<jid>", methods=["GET"])
+@guarded
+def api_job(jid):
+    return ok(job=service.get_job(jid))
 
 
 @app.route("/api/systems/<sid>/inspect-input", methods=["POST"])
 @guarded
 def api_inspect_input(sid):
     files = _files("files")
-    if not files:
+    inbox, _ = _inbox_and_token()
+    if not files and not inbox:
         raise ValueError("Upload at least one input file.")
-    return ok(**service.inspect_input(store(), sid, files))
+    st = store()
+    jid = service.start_job("inspect", lambda progress: service.inspect_input(
+        st, sid, service.resolve_inputs(st, files, inbox), inbox))
+    return ok(job_id=jid)
 
 
 @app.route("/api/systems/<sid>/preview-filter", methods=["POST"])

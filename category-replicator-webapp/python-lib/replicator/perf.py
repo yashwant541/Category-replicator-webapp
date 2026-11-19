@@ -106,9 +106,15 @@ class Timer:
         self.t0 = time.perf_counter()
         self.stages: "OrderedDict[str, float]" = OrderedDict()
         self.info: Dict[str, Any] = {}
+        self.on_stage = None                       # optional callback(stage name): lets a background job show progress
 
     @contextmanager
     def stage(self, name: str) -> Iterator[None]:
+        if self.on_stage:
+            try:
+                self.on_stage(name)
+            except Exception:  # noqa: BLE001 - progress reporting must never break a run
+                pass
         t = time.perf_counter()
         try:
             yield

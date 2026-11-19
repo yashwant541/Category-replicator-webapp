@@ -108,3 +108,5 @@ table.t tr:hover td { background: var(--surface-2); }
 .radio input { margin-right: 8px; }
 .empty { text-align: center; padding: 40px 10px; color: var(--muted); }
 details > summary { cursor: pointer; font-weight: 600; }
+
+.topnav .btn.active { background: var(--accent-soft); color: var(--accent); border-color: var(--accent); }

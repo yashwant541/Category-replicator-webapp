@@ -22,6 +22,25 @@
     return data;
   }
 
+  // A big file takes minutes: the server starts a background job and returns its id; we poll until it is done
+  // (so no single request stays open long enough for the proxy to cut it).
+  const STAGE_LABEL = { starting: "starting", read: "reading the file(s)", filter: "filtering rows", build: "building the sheets",
+    write: "writing the workbook", "original format": "writing the original format", save: "saving the result" };
+  async function callJob(path, opts, onStage) {
+    const first = await call(path, opts);
+    if (!first.job_id) return first;
+    let fails = 0;
+    for (;;) {
+      await new Promise(r => setTimeout(r, 1500));
+      let j;
+      try { j = (await call("/api/jobs/" + first.job_id)).job; fails = 0; }
+      catch (e) { if (/gone|restart/i.test(e.message) || ++fails > 20) throw e; continue; }   // a dropped poll is retried
+      if (onStage) onStage(j);
+      if (j.state === "done") return j.result;
+      if (j.state === "error") throw new Error(j.error || "The job failed");
+    }
+  }
+
   const $ = (s, r) => (r || document).querySelector(s);
   function h(tag, attrs, kids) {
     const n = document.createElement(tag);
@@ -136,6 +155,8 @@
     const hash = location.hash.replace(/^#/, "") || "/";
     const tok = ++ROUTE_TOKEN;
     const m = hash.match(/^\/s\/([^/]+)(?:\/(\w+))?/);
+    const hl = document.getElementById("heavy-link"); if (hl) hl.classList.toggle("active", hash.indexOf("/heavy") === 0);
+    if (hash.indexOf("/heavy") === 0) return viewHeavy(tok);
     if (hash === "/new") return viewBuilder();
     if (m) return viewSystem(m[1], m[2] || "rules", tok);
     return viewHome();
@@ -584,9 +605,9 @@
   }
 
   /* ---------------------------------------------------------------- run tab */
-  function tabRun(body) {
+  function tabRun(body, heavy) {
     const s = SYS;
-    const files = { in: [], map: [] }; const tog = {};
+    const files = { in: [], map: [] }; const tog = {}; let inboxSel = [], readMsg = "";
     const togBox = (s.toggles || []).length ? h("div", { class: "card", style: "margin:12px 0 0;box-shadow:none;background:var(--surface-2)" }, [
       h("h3", { text: "Toggles used by the formulas" }),
       h("div", { class: "muted small", text: "Taken from the Toggle sheet of your mapping (attach an updated mapping to change them for good) — or override for this run only:" }),
@@ -656,11 +677,13 @@
     const activeTop = () => pruneConds(rf.conds, true);          // filled-in conditions/groups (each remembers its editor row in _src)
     const active = () => stripSrc(activeTop());
     async function onInput() {
-      info = null; drawFilter();
-      if (!files.in.length) return;
+      info = null; readMsg = ""; drawFilter();
+      if (!files.in.length && !inboxSel.length) return;
       try {
         const fd = new FormData(); files.in.forEach(f => fd.append("files", f));
-        info = await call("/api/systems/" + s.id + "/inspect-input", { method: "POST", body: fd });
+        fd.append("inbox", JSON.stringify(inboxSel));
+        info = await callJob("/api/systems/" + s.id + "/inspect-input", { method: "POST", body: fd },
+          j => { readMsg = (STAGE_LABEL[j.stage] || j.stage) + " · " + Math.round(j.seconds || 0) + " s"; drawFilter(); });
         pv = null; pvErr = "";
       } catch (e) { toast(e.message, true); }
       drawFilter();
@@ -670,7 +693,7 @@
       clear(filterBox);
       const cols = colList();
       filterBox.appendChild(h("div", { class: "row" }, [h("h3", { text: "Filter this run's data (optional)", style: "margin:0" }), h("span", { class: "spacer" }),
-        info ? h("span", { class: "pill ok", text: info.rows + " rows · " + info.columns.length + " columns in your file" }) : (files.in.length ? h("span", { class: "muted small" }, [h("span", { class: "spin" }), "reading your file…"]) : null)]));
+        info ? h("span", { class: "pill ok", text: info.rows + " rows · " + info.columns.length + " columns in your file" }) : ((files.in.length || inboxSel.length) ? h("span", { class: "muted small" }, [h("span", { class: "spin" }), "reading your file… " + readMsg]) : null)]));
       filterBox.appendChild(h("div", { class: "muted small", text: "Keep only some of the new data for this run. Add conditions on any column of the file — type the column name in any case — and combine them with ALL (AND) / ANY (OR), including groups inside groups. Example: Import does not contain NONTP. Conditions without a value are ignored. This is applied on top of the system's own input filter and before the rows are split into sheets; it is not saved." }));
       badges = [];
       if (rf.conds.length > 1) filterBox.appendChild(h("div", { class: "row small", style: "margin-top:6px" }, [h("span", { text: "Rows must match" }),
@@ -690,21 +713,30 @@
       h("div", { class: "row small", style: "margin-top:8px" }, [h("span", { text: "Rows per output tab" }), bigOpt.rows, h("span", { text: "Worker processes" }), bigOpt.workers]),
       h("div", { class: "muted small", text: "A sheet with more rows than fit on one tab continues on 'Name (2)', 'Name (3)'… (Excel's limit is 1,048,576 rows per tab). Big files are read and written by several worker processes at the same time." })]);
     const btn = h("button", { class: "btn", text: "Run", onclick: async () => {
-      if (!files.in.length) return toast("Add at least one input file", true);
+      if (!files.in.length && !inboxSel.length) return toast("Add at least one input file", true);
       const fd = new FormData();
-      files.in.forEach(f => fd.append("files", f)); files.map.forEach(f => fd.append("mappings", f));
+      // the file is already on the server (read for the filter preview, or picked from the inbox): do not upload 500 MB again
+      if (info && info.token) fd.append("token", info.token);
+      else { files.in.forEach(f => fd.append("files", f)); fd.append("inbox", JSON.stringify(inboxSel)); }
+      files.map.forEach(f => fd.append("mappings", f));
       if (Object.keys(tog).length) fd.append("toggles", JSON.stringify(tog));
       if (active().length) fd.append("filters", JSON.stringify({ match: rf.match, conditions: active() }));
       const opt = {}; if (String(bigOpt.rows.value).trim()) opt.max_rows_per_sheet = bigOpt.rows.value; if (String(bigOpt.workers.value).trim()) opt.workers = bigOpt.workers.value;
       if (Object.keys(opt).length) fd.append("options", JSON.stringify(opt));
+      if (heavy) fd.append("heavy", "1");
       btn.disabled = true; btn.textContent = "Running…";
-      try { LAST_RUN = (await call("/api/systems/" + s.id + "/run", { method: "POST", body: fd })).run; showRun(out, LAST_RUN); }
-      catch (e) { toast(e.message, true); }
+      const prog = h("div", { class: "note", style: "margin-top:10px" }); out.appendChild(prog);
+      try {
+        LAST_RUN = await callJob("/api/systems/" + s.id + "/run", { method: "POST", body: fd },
+          j => { prog.textContent = "Working: " + (STAGE_LABEL[j.stage] || j.stage) + " · " + Math.round(j.seconds || 0) + " s elapsed - big files take minutes, you can leave this page open."; });
+        prog.remove(); showRun(out, LAST_RUN); if (heavy) heavy.afterRun();
+      }
+      catch (e) { prog.remove(); toast(e.message, true); }
       btn.disabled = false; btn.textContent = "Run";
     } });
     body.appendChild(h("div", { class: "card" }, [h("h2", { text: "Run on new data" }),
       h("div", { class: "muted small", text: "Upload new input in the same layout (" + s.input.required.slice(0, 6).join(", ") + (s.input.required.length > 6 ? "…" : "") + "). The system builds every derived column" + (s.filters.split.enabled ? " and splits the rows into the sample's sheets" : "") + "." }),
-      h("div", { class: "grid g2", style: "margin-top:12px" }, [zone("in", "Input file(s)", "Drop new input here", true),
+      h("div", { class: "grid g2", style: "margin-top:12px" }, [heavy ? h("div", {}, [h("h3", { text: "Input file(s)" }), h("div", { class: "note", text: "The files ticked under 1 · Upload are used (read on the server - nothing is uploaded again)." })]) : zone("in", "Input file(s)", "Drop new input here", true),
         zone("map", "Updated mappings / toggles (optional)", "Replace the stored mapping or Toggle sheets for this run", true)]),
       filterBox,
       togBox,
@@ -713,7 +745,127 @@
         h("span", { class: "muted small", text: "The output holds your sample's formulas; Excel calculates them when the file is opened." }),
         h("span", { class: "spacer" }), btn])]));
     body.appendChild(out);
-    if (LAST_RUN && LAST_RUN.system === s.id) showRun(out, LAST_RUN);
+    if (heavy) heavy.bind(names => { inboxSel = names; onInput(); });
+    else if (LAST_RUN && LAST_RUN.system === s.id) showRun(out, LAST_RUN);
+  }
+
+  /* ---------------------------------------------------------------- heavy file mode */
+  // A separate screen for very big files. Same run form as the normal Run tab, but the input comes from an UPLOAD folder on the
+  // server (files are sent in small pieces, so no single request is large) and the result is written to a DOWNLOAD folder.
+  let HV_SID = "";
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  const mb = n => n == null ? "" : (n >= 1024 ? (n / 1024).toFixed(2) + " GB" : n + " MB");
+
+  async function uploadChunked(file, onProgress) {
+    const id = Math.random().toString(36).slice(2, 12) + Date.now().toString(36);
+    const CH = 8 * 1024 * 1024, total = Math.max(1, Math.ceil(file.size / CH));
+    for (let i = 0; i < total; i++) {
+      const blob = file.slice(i * CH, (i + 1) * CH);
+      for (let attempt = 0; ; attempt++) {
+        try {
+          const res = await fetch(API + "/api/heavy/upload?name=" + encodeURIComponent(file.name) + "&id=" + id + "&index=" + i + "&total=" + total,
+            { method: "POST", headers: { "Content-Type": "application/octet-stream" }, body: blob });
+          let d = null; try { d = await res.json(); } catch (e) {}
+          if (!res.ok || (d && d.success === false)) throw new Error((d && d.error) || ("HTTP " + res.status));
+          break;
+        } catch (e) { if (attempt >= 2) throw e; await sleep(1000 * (attempt + 1)); }     // a dropped piece is sent again
+      }
+      onProgress((i + 1) / total);
+    }
+  }
+
+  async function viewHeavy(tok) {
+    const root = clear(main());
+    let systems = [];
+    try { systems = (await call("/api/systems")).systems; } catch (e) { root.appendChild(h("div", { class: "note err", text: e.message })); return; }
+    if (tok !== ROUTE_TOKEN) return;
+    let selected = [], bindFn = null, upBox = h("div", {}), downBox = h("div", {}), runBox = h("div", {}), busy = {};
+
+    root.appendChild(h("div", { class: "head" }, [h("div", {}, [h("h1", { text: "Heavy file mode" }),
+      h("div", { class: "muted", text: "For very big input files. Upload them to the server's upload folder, run a system on the ticked files, then download the result from the download folder. Clear the folders when you are done." })]),
+      h("a", { class: "btn ghost", href: "#/", text: "Back to normal mode" })]));
+
+    // ---- 1 · upload
+    async function drawUploads() {
+      let files = [];
+      try { files = (await call("/api/heavy/uploads")).files; } catch (e) { clear(upBox).appendChild(h("div", { class: "note err", text: e.message })); return; }
+      selected = selected.filter(n => files.some(f => f.name === n));
+      clear(upBox);
+      const inp = h("input", { type: "file", multiple: true });
+      const go = async fl => {
+        for (const f of Array.prototype.slice.call(fl)) {
+          const bar = h("div", { class: "note", text: f.name + " · 0%" }); upBox.insertBefore(bar, upBox.firstChild);
+          try { await uploadChunked(f, p => { bar.textContent = f.name + " · " + Math.round(p * 100) + "%"; }); selected.push(f.name); toast(f.name + " uploaded"); }
+          catch (e) { toast(f.name + ": " + e.message, true); }
+          bar.remove();
+        }
+        await drawUploads(); notify();
+      };
+      inp.addEventListener("change", () => go(inp.files));
+      const z = h("label", { class: "drop" }, [h("div", { text: "Drop big input files here, or click to choose" }), inp]);
+      z.addEventListener("dragover", e => { e.preventDefault(); z.classList.add("over"); });
+      z.addEventListener("dragleave", () => z.classList.remove("over"));
+      z.addEventListener("drop", e => { e.preventDefault(); z.classList.remove("over"); go(e.dataTransfer.files); });
+      upBox.appendChild(z);
+      if (!files.length) upBox.appendChild(h("div", { class: "muted small", style: "margin-top:8px", text: "The upload folder is empty." }));
+      else {
+        const cnt = h("span", { class: "muted small", text: selected.length + " of " + files.length + " ticked for the run" });
+        upBox.appendChild(h("table", { class: "t", style: "margin-top:10px" }, [h("tbody", {}, files.map(f => h("tr", {}, [
+          h("td", {}, [h("input", { type: "checkbox", ...(selected.includes(f.name) ? { checked: true } : {}),
+            onchange: e => { selected = e.target.checked ? selected.concat([f.name]) : selected.filter(x => x !== f.name); cnt.textContent = selected.length + " of " + files.length + " ticked for the run"; notify(); } })]),
+          h("td", {}, [h("b", { text: f.name })]), h("td", { class: "muted small", text: mb(f.mb) }),
+          h("td", {}, [h("button", { class: "btn ghost small", text: "Delete", onclick: async () => {
+            await call("/api/heavy/uploads/delete", { method: "POST", json: { names: [f.name] } }); selected = selected.filter(x => x !== f.name); await drawUploads(); notify(); } })])])))]));
+        upBox.appendChild(h("div", { class: "row", style: "margin-top:8px" }, [
+          cnt, h("span", { class: "spacer" }),
+          h("button", { class: "btn ghost small", text: "Delete ticked", onclick: async () => {
+            if (!selected.length) return toast("Tick the files to delete", true);
+            await call("/api/heavy/uploads/delete", { method: "POST", json: { names: selected } }); selected = []; await drawUploads(); notify(); } }),
+          h("button", { class: "btn ghost small", text: "Clear all uploads", onclick: async () => {
+            if (!confirm("Delete ALL files in the upload folder?")) return;
+            await call("/api/heavy/uploads/clear", { method: "POST" }); selected = []; await drawUploads(); notify(); } })]));
+      }
+    }
+    let nt = null;
+    const notify = () => { clearTimeout(nt); nt = setTimeout(() => { if (bindFn) bindFn(selected.slice()); }, 800); };      // a big file is read only once the ticking settles
+
+    // ---- 3 · downloads
+    async function drawDownloads() {
+      let files = [];
+      try { files = (await call("/api/heavy/downloads")).files; } catch (e) { clear(downBox).appendChild(h("div", { class: "note err", text: e.message })); return; }
+      clear(downBox);
+      if (!files.length) { downBox.appendChild(h("div", { class: "muted small", text: "The download folder is empty. Results of heavy runs appear here." })); return; }
+      downBox.appendChild(h("table", { class: "t" }, [h("tbody", {}, files.map(f => h("tr", {}, [
+        h("td", {}, [h("b", { text: f.name })]), h("td", { class: "muted small", text: mb(f.mb) }),
+        h("td", {}, [h("button", { class: "btn small", text: "Download", onclick: () => dl("/api/heavy/downloads/file?name=" + encodeURIComponent(f.name)) }),
+          " ", h("button", { class: "btn ghost small", text: "Delete", onclick: async () => {
+            await call("/api/heavy/downloads/delete", { method: "POST", json: { names: [f.name] } }); drawDownloads(); } })])])))]));
+      downBox.appendChild(h("div", { class: "row", style: "margin-top:8px" }, [h("span", { class: "spacer" }),
+        h("button", { class: "btn ghost small", text: "Clear all downloads", onclick: async () => {
+          if (!confirm("Delete ALL files in the download folder?")) return;
+          await call("/api/heavy/downloads/clear", { method: "POST" }); drawDownloads(); } })]));
+    }
+
+    // ---- 2 · the system + the same run form as the normal Run tab
+    async function drawRun(sid) {
+      HV_SID = sid; bindFn = null; clear(runBox);
+      if (!sid) { runBox.appendChild(h("div", { class: "muted small", text: "Choose the system to run." })); return; }
+      runBox.appendChild(h("div", { class: "muted" }, [h("span", { class: "spin" }), "Loading…"]));
+      try { SYS = (await call("/api/systems/" + sid)).system; LAST_RUN = null; } catch (e) { clear(runBox).appendChild(h("div", { class: "note err", text: e.message })); return; }
+      if (HV_SID !== sid) return;
+      clear(runBox);
+      tabRun(runBox, { bind: fn => { bindFn = fn; fn(selected.slice()); }, afterRun: drawDownloads });
+    }
+
+    const sel = h("select", { class: "inl", onchange: e => drawRun(e.target.value) },
+      [h("option", { value: "", text: "- choose a system -" }), ...systems.map(s => h("option", { value: s.id, text: s.name, ...(s.id === HV_SID ? { selected: true } : {}) }))]);
+    root.appendChild(h("div", { class: "card" }, [h("h2", { text: "1 · Upload" }),
+      h("div", { class: "muted small", text: "Files go to the upload folder in small pieces and stay there until you delete them." }), upBox]));
+    root.appendChild(h("div", { class: "card" }, [h("h2", { text: "2 · Run" }), h("div", { class: "row small" }, [h("span", { text: "System" }), sel]), runBox]));
+    root.appendChild(h("div", { class: "card" }, [h("h2", { text: "3 · Download" }), downBox]));
+    await drawUploads(); drawDownloads();
+    if (HV_SID) drawRun(HV_SID);
+    else drawRun("");
   }
 
   function showRun(box, run) {

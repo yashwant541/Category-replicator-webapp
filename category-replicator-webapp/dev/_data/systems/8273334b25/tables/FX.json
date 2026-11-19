@@ -1,0 +1,38 @@
+{
+ "headers": [
+  "Currency",
+  "RateToUSD"
+ ],
+ "records": [
+  {
+   "Currency": "USD",
+   "RateToUSD": 1
+  },
+  {
+   "Currency": "EUR",
+   "RateToUSD": 1.08
+  },
+  {
+   "Currency": "GBP",
+   "RateToUSD": 1.27
+  },
+  {
+   "Currency": "AED",
+   "RateToUSD": 0.2723
+  },
+  {
+   "Currency": "SGD",
+   "RateToUSD": 0.74
+  },
+  {
+   "Currency": "JPY",
+   "RateToUSD": 0.0067
+  },
+  {
+   "Currency": "INR",
+   "RateToUSD": 0.012
+  }
+ ],
+ "header_row": 0,
+ "col_offset": 0
+}

@@ -1,0 +1,41 @@
+{
+ "headers": [
+  "Product",
+  "LGD",
+  "CollateralHaircut"
+ ],
+ "records": [
+  {
+   "Product": "Mortgage",
+   "LGD": 0.15,
+   "CollateralHaircut": 0.3
+  },
+  {
+   "Product": "Credit Card",
+   "LGD": 0.65,
+   "CollateralHaircut": 0
+  },
+  {
+   "Product": "Personal Loan",
+   "LGD": 0.45,
+   "CollateralHaircut": 0.05
+  },
+  {
+   "Product": "Term Loan",
+   "LGD": 0.35,
+   "CollateralHaircut": 0.1
+  },
+  {
+   "Product": "Revolver",
+   "LGD": 0.4,
+   "CollateralHaircut": 0.15
+  },
+  {
+   "Product": "Trade Finance",
+   "LGD": 0.3,
+   "CollateralHaircut": 0.2
+  }
+ ],
+ "header_row": 0,
+ "col_offset": 0
+}

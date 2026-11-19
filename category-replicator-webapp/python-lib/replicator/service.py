@@ -333,8 +333,9 @@ def run_system(store, sid: str, input_files: List[Tuple[str, bytes]],
                mapping_files: Optional[List[Tuple[str, bytes]]] = None,
                toggle_values: Optional[Dict[str, str]] = None,
                run_filter: Optional[Dict[str, Any]] = None,
-               options: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+               options: Optional[Dict[str, Any]] = None, progress=None, heavy: bool = False) -> Dict[str, Any]:
     timer = perf.Timer()
+    timer.on_stage = progress
     s = get_system(store, sid)
     opts = clean_run_options(options)
     nw = opts.get("workers")
@@ -372,10 +373,20 @@ def run_system(store, sid: str, input_files: List[Tuple[str, bytes]],
     with timer.stage("original format"):                 # the input came as csv / xlsm / ...: the output in that format too
         extras, fnotes = formats.original_outputs(res["sheets"], parts, data, used, f"{_slug(s['name'])}_{rid}")
     notes += fnotes
+    fname = f"{_slug(s['name'])}_{rid}.xlsx"
+    dfiles: List[str] = []
     with timer.stage("save"):
-        store.put(f"runs/{sid}/{rid}/output.xlsx", data)
-        for e in extras:
-            store.put(f"runs/{sid}/{rid}/original/{e['filename']}", e["data"])
+        if heavy:                          # heavy mode: the output goes to the download folder (and only there)
+            dst, dpre = _area(store, "downloads")
+            dst.put(dpre + fname, data)
+            dfiles.append(fname)
+            for e in extras:
+                dst.put(dpre + e["filename"], e["data"])
+                dfiles.append(e["filename"])
+        else:
+            store.put(f"runs/{sid}/{rid}/output.xlsx", data)
+            for e in extras:
+                store.put(f"runs/{sid}/{rid}/original/{e['filename']}", e["data"])
     preview = {}
     for sn, item in res["sheets"].items():
         f = engine.full_frame(item, 0, 25)
@@ -395,7 +406,7 @@ def run_system(store, sid: str, input_files: List[Tuple[str, bytes]],
             "extra_outputs": [{"format": e["format"], "filename": e["filename"], "note": e["note"], "mb": round(len(e["data"]) / 1048576.0, 2)}
                               for e in extras],
             "notes": notes, "inputs": used, "toggles": res["toggles"], "run_filter": rf, "timing": timing,
-            "filename": f"{_slug(s['name'])}_{rid}.xlsx"}
+            "filename": fname, "heavy": bool(heavy), "download_files": dfiles}
     put_json(store, f"runs/{sid}/{rid}/meta.json", meta)
     return {**meta, "preview": preview}
 
@@ -409,11 +420,95 @@ def _remember(sid: str, token: str, df: pd.DataFrame) -> None:
         _FRAMES.popitem(last=False)
 
 
-def _stash(store, files: List[Tuple[str, bytes]]) -> str:
-    """Keep a loaded input briefly (tmp/<token>/) so filter previews do not re-upload it every keystroke."""
+# ---------------------------------------------------------------------------- heavy-file mode
+# Two places, set once in the backend code (UPLOAD_FOLDER / DOWNLOAD_FOLDER): files the user uploaded for big runs, and the
+# outputs of those runs. Each is (store, prefix); by default both are sub-folders of the system's own folder.
+_HEAVY: Dict[str, Tuple[Any, str]] = {}
+_INBOX_MARK = b"@inbox:"
+
+
+def configure_heavy(up_store, up_prefix: str, down_store, down_prefix: str) -> None:
+    _HEAVY["uploads"] = (up_store, up_prefix.strip("/") + "/" if up_prefix.strip("/") else "")
+    _HEAVY["downloads"] = (down_store, down_prefix.strip("/") + "/" if down_prefix.strip("/") else "")
+
+
+def _area(store, area: str) -> Tuple[Any, str]:
+    if area not in ("uploads", "downloads"):
+        raise ValueError("Unknown area.")
+    return _HEAVY.get(area) or (store, "heavy_" + area + "/")
+
+
+def _safe_name(name: str) -> str:
+    n = (name or "").strip()
+    if not n or "/" in n or "\\" in n or n.startswith(".") or ".." in n or len(n) > 200:
+        raise ValueError("Bad file name.")
+    return n
+
+
+def list_area(store, area: str) -> List[Dict[str, Any]]:
+    """Files of the heavy-mode upload or download folder, with sizes (MB)."""
+    st, pre = _area(store, area)
+    out = []
+    for p in st.list(pre):
+        name = p.lstrip("/")[len(pre):]
+        if name and "/" not in name and not name.startswith("."):
+            sz = st.size(pre + name) if hasattr(st, "size") else None
+            out.append({"name": name, "ext": file_ext(name), "mb": None if sz is None else round(sz / 1048576.0, 1)})
+    return out
+
+
+def area_get(store, area: str, name: str) -> bytes:
+    st, pre = _area(store, area)
+    data = st.get(pre + _safe_name(name))
+    if data is None:
+        raise KeyError("file not found")
+    return data
+
+
+def area_delete(store, area: str, names: List[str]) -> int:
+    st, pre = _area(store, area)
+    n = 0
+    for name in names:
+        st.delete(pre + _safe_name(name))
+        n += 1
+    return n
+
+
+def area_clear(store, area: str) -> int:
+    st, pre = _area(store, area)
+    n = 0
+    for f in list_area(store, area):
+        st.delete(pre + f["name"])
+        n += 1
+    return n
+
+
+def area_put_file(store, area: str, name: str, local_path: str) -> None:
+    st, pre = _area(store, area)
+    st.put_file(pre + _safe_name(name), local_path)
+
+
+def resolve_inputs(store, uploads: List[Tuple[str, bytes]], inbox: Optional[List[str]] = None,
+                   token: Optional[str] = None) -> List[Tuple[str, bytes]]:
+    """Input files of a request: uploaded ones, files from the heavy-mode upload folder, or a stash left by inspect_input."""
+    files = list(uploads)
+    for n in inbox or []:
+        try:
+            files.append((n, area_get(store, "uploads", n)))
+        except KeyError:
+            raise ValueError(f"{n} is not in the uploads folder any more.")
+    if token and not files:
+        files = _unstash(store, token)
+    return files
+
+
+def _stash(store, files: List[Tuple[str, bytes]], inbox: Optional[List[str]] = None) -> str:
+    """Keep a loaded input briefly (tmp/<token>/) so filter previews and the run do not re-upload it."""
     token = dt.datetime.utcnow().strftime("%Y%m%d%H%M%S") + "-" + uuid.uuid4().hex[:6]
+    ib = set(inbox or [])
     for i, (name, data) in enumerate(files):
-        store.put(f"tmp/{token}/{i}__{_slug(name)}", data)
+        # an inbox file is already in the folder: remember only where, never a second 500 MB copy
+        store.put(f"tmp/{token}/{i}__{_slug(name)}", _INBOX_MARK + name.encode("utf-8") if name in ib else data)
     cutoff = (dt.datetime.utcnow() - dt.timedelta(days=1)).strftime("%Y%m%d%H%M%S")
     for p in store.list("tmp/"):                                  # drop stashes older than a day
         t = p.strip("/").split("/")[1] if p.count("/") >= 2 else ""
@@ -428,7 +523,17 @@ def _unstash(store, token: str) -> List[Tuple[str, bytes]]:
     paths = sorted(store.list(f"tmp/{token}/"), key=lambda p: int(p.rsplit("/", 1)[1].split("__", 1)[0]))
     if not paths:
         raise ValueError("Drop the new input file again (its temporary copy is gone).")
-    return [(p.rsplit("/", 1)[1].split("__", 1)[1], store.get(p)) for p in paths]
+    out = []
+    for p in paths:
+        name, data = p.rsplit("/", 1)[1].split("__", 1)[1], store.get(p)
+        if data is not None and data.startswith(_INBOX_MARK):
+            name = data[len(_INBOX_MARK):].decode("utf-8")
+            try:
+                data = area_get(store, "uploads", name)
+            except KeyError:
+                raise ValueError(f"{name} is not in the uploads folder any more.")
+        out.append((name, data))
+    return out
 
 
 def preview_filter(store, sid: str, token: str, run_filter: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -441,11 +546,11 @@ def preview_filter(store, sid: str, token: str, run_filter: Optional[Dict[str, A
     return engine.preview_counts(s, df, run_filter)
 
 
-def inspect_input(store, sid: str, files: List[Tuple[str, bytes]]) -> Dict[str, Any]:
+def inspect_input(store, sid: str, files: List[Tuple[str, bytes]], inbox: Optional[List[str]] = None) -> Dict[str, Any]:
     """What the new input looks like, so a run filter can offer its real columns and values."""
     s = get_system(store, sid)
     df, _, used = _read_inputs(s, files)
-    token = _stash(store, files)
+    token = _stash(store, files, inbox)
     _remember(sid, token, df)
     values: Dict[str, List[str]] = {}
     for c in df.columns:
@@ -473,6 +578,14 @@ def list_runs(store, sid: str) -> List[Dict[str, Any]]:
 def get_run_file(store, sid: str, rid: str, extra: Optional[str] = None) -> Tuple[bytes, str]:
     """The run's .xlsx, or - with ``extra`` = a file name from meta['extra_outputs'] - its output in the input's own format."""
     meta = get_json(store, f"runs/{sid}/{rid}/meta.json") or {}
+    if meta.get("heavy"):                                   # kept in the download folder, which can be cleared
+        name = extra or meta.get("filename", "")
+        if name not in meta.get("download_files", []):
+            raise KeyError("file not found")
+        try:
+            return area_get(store, "downloads", name), name
+        except KeyError:
+            raise KeyError("This output was removed from the downloads folder.")
     if extra:
         if extra not in [e["filename"] for e in meta.get("extra_outputs", [])]:
             raise KeyError("file not found")
@@ -495,3 +608,58 @@ def input_template(system: Dict[str, Any]) -> bytes:
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
+
+
+# ---------------------------------------------------------------------------- background jobs
+# A big run takes minutes; one blocking HTTP request would be cut by the proxy long before. The request only starts the job
+# and returns at once; the page asks get_job() every few seconds (state, stage, seconds) until it is done.
+_JOBS: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
+_JOBS_LOCK = threading.Lock()
+
+
+def start_job(kind: str, fn) -> str:
+    """Run ``fn(progress)`` in a thread; ``progress(stage)`` updates what the page shows. Returns the job id."""
+    import time
+    jid = uuid.uuid4().hex[:12]
+    job: Dict[str, Any] = {"id": jid, "kind": kind, "state": "running", "stage": "starting", "t0": time.time(), "result": None, "error": None}
+    with _JOBS_LOCK:
+        _JOBS[jid] = job
+        while len(_JOBS) > 20:
+            _JOBS.popitem(last=False)
+
+    def progress(stage: str) -> None:
+        job["stage"] = stage
+
+    def work() -> None:
+        try:
+            job["result"] = fn(progress)
+            job["state"] = "done"
+        except KeyError as exc:
+            job["error"] = str(exc.args[0] if exc.args else "not found"); job["state"] = "error"
+        except ValueError as exc:
+            job["error"] = str(exc); job["state"] = "error"
+        except MemoryError:
+            job["error"] = ("The server ran out of memory reading this file. Use fewer / smaller input files, or give the "
+                            "Dataiku backend more memory (a 500 MB .xlsx needs several GB).")
+            job["state"] = "error"
+        except Exception as exc:  # noqa: BLE001
+            import traceback
+            job["error"] = f"{type(exc).__name__}: {exc}"; job["details"] = traceback.format_exc()[-1500:]; job["state"] = "error"
+        finally:
+            job["seconds"] = round(time.time() - job["t0"], 1)
+    threading.Thread(target=work, daemon=True, name="replicator-job-" + jid).start()
+    return jid
+
+
+def get_job(jid: str) -> Dict[str, Any]:
+    import time
+    job = _JOBS.get(jid)
+    if job is None:
+        raise KeyError("This job is gone (the backend was restarted). Start it again.")
+    out = {k: job[k] for k in ("id", "kind", "state", "stage", "error") if k in job}
+    out["seconds"] = job.get("seconds") if job["state"] != "running" else round(time.time() - job["t0"], 1)
+    if job["state"] == "done":
+        out["result"] = job["result"]
+    if job.get("details"):
+        out["details"] = job["details"]
+    return out

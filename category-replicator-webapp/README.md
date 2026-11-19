@@ -49,6 +49,16 @@ restart the backend.
   outputs* or per run under *Large data options*.
 - **Output in the input's format:** the `.xlsx` is always produced. If the input was `.xlsm/.xltx/.xltm` you also get the same workbook in that
   format. `.xls/.xlsb/.ods/.parquet` cannot be written here - the run says so. Extra files have their own download buttons.
+- **Heavy file mode** (button in the top banner; the normal screens are unchanged): a separate screen for very big files, e.g. 500 MB.
+  1. **Upload** - files are sent in 8 MB pieces and assembled on the server into the *upload folder* (no single large request, so the
+     Dataiku proxy cannot cut it). Tick the files to use; delete one, delete the ticked ones, or *Clear all uploads*.
+  2. **Run** - pick the system; the same run form as the normal Run tab (filters, toggles, options) works on the ticked files, which are
+     read on the server (nothing is uploaded again). A run is a *background job*: the page shows the stage and elapsed time.
+  3. **Download** - the result is written to the *download folder*; download it, delete it, or *Clear all downloads*.
+  Set the two folders at the top of the backend code: `UPLOAD_FOLDER` and `DOWNLOAD_FOLDER` (managed folder names or ids). Left empty they
+  are sub-folders `heavy_uploads/` and `heavy_downloads/` of the main `REPLICATOR_FOLDER`. If a run still fails the page shows why; the
+  usual cause is memory - a 500 MB `.xlsx` expands to several GB while read, so give the backend enough RAM (and keep `REPLICATOR_WORKERS` low
+  on a small machine).
 - **Time:** every run reports total time, rows/second and the time of each stage (read, filter, build, write, save) in the result and History.
 - **Environment knobs:** `REPLICATOR_WORKERS` (default CPU count, max 8; 1 = no parallelism), `REPLICATOR_ROWS_PER_SHEET`,
   `REPLICATOR_FAST_WRITE_ROWS` (default 100000), `REPLICATOR_PARALLEL_MIN_ROWS`, `REPLICATOR_PARALLEL_MIN_BYTES`, `REPLICATOR_MAX_UPLOAD_MB`

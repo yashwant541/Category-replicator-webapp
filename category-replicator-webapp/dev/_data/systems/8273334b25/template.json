@@ -1,0 +1,564 @@
+{
+ "sheets": [
+  {
+   "name": "Retail_EMEA",
+   "origin": {
+    "row": 0,
+    "col": 0
+   },
+   "columns": [
+    {
+     "name": "LoanID",
+     "col": 0,
+     "kind": "input",
+     "source": "LoanID",
+     "sample_type": "text"
+    },
+    {
+     "name": "Customer",
+     "col": 1,
+     "kind": "input",
+     "source": "Customer",
+     "sample_type": "text"
+    },
+    {
+     "name": "Segment",
+     "col": 2,
+     "kind": "input",
+     "source": "Segment",
+     "sample_type": "text"
+    },
+    {
+     "name": "Region",
+     "col": 3,
+     "kind": "input",
+     "source": "Region",
+     "sample_type": "text"
+    },
+    {
+     "name": "Product",
+     "col": 4,
+     "kind": "input",
+     "source": "Product",
+     "sample_type": "text"
+    },
+    {
+     "name": "Rating",
+     "col": 5,
+     "kind": "input",
+     "source": "Rating",
+     "sample_type": "text"
+    },
+    {
+     "name": "Country",
+     "col": 6,
+     "kind": "input",
+     "source": "Country",
+     "sample_type": "text"
+    },
+    {
+     "name": "Currency",
+     "col": 7,
+     "kind": "input",
+     "source": "Currency",
+     "sample_type": "text"
+    },
+    {
+     "name": "Exposure",
+     "col": 8,
+     "kind": "input",
+     "source": "Exposure",
+     "sample_type": "integer"
+    },
+    {
+     "name": "Collateral",
+     "col": 9,
+     "kind": "input",
+     "source": "Collateral",
+     "sample_type": "integer"
+    },
+    {
+     "name": "Maturity",
+     "col": 10,
+     "kind": "input",
+     "source": "Maturity",
+     "sample_type": "date"
+    },
+    {
+     "name": "FX_Rate",
+     "col": 11,
+     "kind": "formula",
+     "raw": "=VLOOKUP(H2,FX!$A$2:$B$8,2,FALSE)",
+     "sample_row": 2,
+     "sample_type": "decimal"
+    },
+    {
+     "name": "Exposure_USD",
+     "col": 12,
+     "kind": "formula",
+     "raw": "=ROUND(I2*L2,2)",
+     "sample_row": 2,
+     "sample_type": "decimal"
+    },
+    {
+     "name": "PD",
+     "col": 13,
+     "kind": "formula",
+     "raw": "=VLOOKUP(F2,Ratings!$A$2:$C$7,2,FALSE)",
+     "sample_row": 2,
+     "sample_type": "decimal"
+    },
+    {
+     "name": "LGD",
+     "col": 14,
+     "kind": "formula",
+     "raw": "=VLOOKUP(E2,Products!$A$2:$C$7,2,FALSE)",
+     "sample_row": 2,
+     "sample_type": "decimal"
+    },
+    {
+     "name": "Expected_Loss",
+     "col": 15,
+     "kind": "formula",
+     "raw": "=ROUND(M2*N2*O2,2)",
+     "sample_row": 2,
+     "sample_type": "decimal"
+    }
+   ],
+   "params": [],
+   "sample_rows": 28
+  },
+  {
+   "name": "Retail_APAC",
+   "origin": {
+    "row": 0,
+    "col": 0
+   },
+   "columns": [
+    {
+     "name": "LoanID",
+     "col": 0,
+     "kind": "input",
+     "source": "LoanID",
+     "sample_type": "text"
+    },
+    {
+     "name": "Customer",
+     "col": 1,
+     "kind": "input",
+     "source": "Customer",
+     "sample_type": "text"
+    },
+    {
+     "name": "Segment",
+     "col": 2,
+     "kind": "input",
+     "source": "Segment",
+     "sample_type": "text"
+    },
+    {
+     "name": "Region",
+     "col": 3,
+     "kind": "input",
+     "source": "Region",
+     "sample_type": "text"
+    },
+    {
+     "name": "Product",
+     "col": 4,
+     "kind": "input",
+     "source": "Product",
+     "sample_type": "text"
+    },
+    {
+     "name": "Rating",
+     "col": 5,
+     "kind": "input",
+     "source": "Rating",
+     "sample_type": "text"
+    },
+    {
+     "name": "Country",
+     "col": 6,
+     "kind": "input",
+     "source": "Country",
+     "sample_type": "text"
+    },
+    {
+     "name": "Currency",
+     "col": 7,
+     "kind": "input",
+     "source": "Currency",
+     "sample_type": "text"
+    },
+    {
+     "name": "Exposure",
+     "col": 8,
+     "kind": "input",
+     "source": "Exposure",
+     "sample_type": "integer"
+    },
+    {
+     "name": "Collateral",
+     "col": 9,
+     "kind": "input",
+     "source": "Collateral",
+     "sample_type": "integer"
+    },
+    {
+     "name": "Maturity",
+     "col": 10,
+     "kind": "input",
+     "source": "Maturity",
+     "sample_type": "date"
+    },
+    {
+     "name": "FX_Rate",
+     "col": 11,
+     "kind": "formula",
+     "raw": "=VLOOKUP(H2,FX!$A$2:$B$8,2,FALSE)",
+     "sample_row": 2,
+     "sample_type": "decimal"
+    },
+    {
+     "name": "Exposure_USD",
+     "col": 12,
+     "kind": "formula",
+     "raw": "=ROUND(I2*L2,2)",
+     "sample_row": 2,
+     "sample_type": "decimal"
+    },
+    {
+     "name": "Country_Risk",
+     "col": 13,
+     "kind": "formula",
+     "raw": "=VLOOKUP(G2,Countries!$A$2:$C$13,3,FALSE)",
+     "sample_row": 2,
+     "sample_type": "text"
+    },
+    {
+     "name": "Risk_Weight",
+     "col": 14,
+     "kind": "formula",
+     "raw": "=VLOOKUP(F2,Ratings!$A$2:$C$7,3,FALSE)",
+     "sample_row": 2,
+     "sample_type": "decimal"
+    },
+    {
+     "name": "RWA",
+     "col": 15,
+     "kind": "formula",
+     "raw": "=ROUND(M2*O2,2)",
+     "sample_row": 2,
+     "sample_type": "decimal"
+    },
+    {
+     "name": "Review_Flag",
+     "col": 16,
+     "kind": "formula",
+     "raw": "=IF(N2=\"High\",\"Review\",\"OK\")",
+     "sample_row": 2,
+     "sample_type": "text"
+    }
+   ],
+   "params": [],
+   "sample_rows": 24
+  },
+  {
+   "name": "Corporate_Global",
+   "origin": {
+    "row": 0,
+    "col": 0
+   },
+   "columns": [
+    {
+     "name": "LoanID",
+     "col": 0,
+     "kind": "input",
+     "source": "LoanID",
+     "sample_type": "text"
+    },
+    {
+     "name": "Customer",
+     "col": 1,
+     "kind": "input",
+     "source": "Customer",
+     "sample_type": "text"
+    },
+    {
+     "name": "Segment",
+     "col": 2,
+     "kind": "input",
+     "source": "Segment",
+     "sample_type": "text"
+    },
+    {
+     "name": "Region",
+     "col": 3,
+     "kind": "input",
+     "source": "Region",
+     "sample_type": "text"
+    },
+    {
+     "name": "Product",
+     "col": 4,
+     "kind": "input",
+     "source": "Product",
+     "sample_type": "text"
+    },
+    {
+     "name": "Rating",
+     "col": 5,
+     "kind": "input",
+     "source": "Rating",
+     "sample_type": "text"
+    },
+    {
+     "name": "Country",
+     "col": 6,
+     "kind": "input",
+     "source": "Country",
+     "sample_type": "text"
+    },
+    {
+     "name": "Currency",
+     "col": 7,
+     "kind": "input",
+     "source": "Currency",
+     "sample_type": "text"
+    },
+    {
+     "name": "Exposure",
+     "col": 8,
+     "kind": "input",
+     "source": "Exposure",
+     "sample_type": "integer"
+    },
+    {
+     "name": "Collateral",
+     "col": 9,
+     "kind": "input",
+     "source": "Collateral",
+     "sample_type": "integer"
+    },
+    {
+     "name": "Maturity",
+     "col": 10,
+     "kind": "input",
+     "source": "Maturity",
+     "sample_type": "date"
+    },
+    {
+     "name": "FX_Rate",
+     "col": 11,
+     "kind": "formula",
+     "raw": "=VLOOKUP(H2,FX!$A$2:$B$8,2,FALSE)",
+     "sample_row": 2,
+     "sample_type": "decimal"
+    },
+    {
+     "name": "Exposure_USD",
+     "col": 12,
+     "kind": "formula",
+     "raw": "=ROUND(I2*L2,2)",
+     "sample_row": 2,
+     "sample_type": "decimal"
+    },
+    {
+     "name": "Haircut",
+     "col": 13,
+     "kind": "formula",
+     "raw": "=VLOOKUP(E2,Products!$A$2:$C$7,3,FALSE)",
+     "sample_row": 2,
+     "sample_type": "decimal"
+    },
+    {
+     "name": "Net_Exposure",
+     "col": 14,
+     "kind": "formula",
+     "raw": "=MAX(0,M2-J2*L2*(1-N2))",
+     "sample_row": 2,
+     "sample_type": "decimal"
+    },
+    {
+     "name": "Risk_Weight",
+     "col": 15,
+     "kind": "formula",
+     "raw": "=VLOOKUP(F2,Ratings!$A$2:$C$7,3,FALSE)",
+     "sample_row": 2,
+     "sample_type": "decimal"
+    },
+    {
+     "name": "RWA",
+     "col": 16,
+     "kind": "formula",
+     "raw": "=ROUND(O2*P2,2)",
+     "sample_row": 2,
+     "sample_type": "decimal"
+    },
+    {
+     "name": "Years_To_Maturity",
+     "col": 17,
+     "kind": "formula",
+     "raw": "=YEAR(K2)-2026",
+     "sample_row": 2,
+     "sample_type": "integer"
+    },
+    {
+     "name": "Tenor_Bucket",
+     "col": 18,
+     "kind": "formula",
+     "raw": "=IF(R2>=5,\"Long\",IF(R2>=2,\"Medium\",\"Short\"))",
+     "sample_row": 2,
+     "sample_type": "text"
+    }
+   ],
+   "params": [],
+   "sample_rows": 26
+  },
+  {
+   "name": "SME_Global",
+   "origin": {
+    "row": 0,
+    "col": 0
+   },
+   "columns": [
+    {
+     "name": "LoanID",
+     "col": 0,
+     "kind": "input",
+     "source": "LoanID",
+     "sample_type": "text"
+    },
+    {
+     "name": "Customer",
+     "col": 1,
+     "kind": "input",
+     "source": "Customer",
+     "sample_type": "text"
+    },
+    {
+     "name": "Segment",
+     "col": 2,
+     "kind": "input",
+     "source": "Segment",
+     "sample_type": "text"
+    },
+    {
+     "name": "Region",
+     "col": 3,
+     "kind": "input",
+     "source": "Region",
+     "sample_type": "text"
+    },
+    {
+     "name": "Product",
+     "col": 4,
+     "kind": "input",
+     "source": "Product",
+     "sample_type": "text"
+    },
+    {
+     "name": "Rating",
+     "col": 5,
+     "kind": "input",
+     "source": "Rating",
+     "sample_type": "text"
+    },
+    {
+     "name": "Country",
+     "col": 6,
+     "kind": "input",
+     "source": "Country",
+     "sample_type": "text"
+    },
+    {
+     "name": "Currency",
+     "col": 7,
+     "kind": "input",
+     "source": "Currency",
+     "sample_type": "text"
+    },
+    {
+     "name": "Exposure",
+     "col": 8,
+     "kind": "input",
+     "source": "Exposure",
+     "sample_type": "integer"
+    },
+    {
+     "name": "Collateral",
+     "col": 9,
+     "kind": "input",
+     "source": "Collateral",
+     "sample_type": "integer"
+    },
+    {
+     "name": "Maturity",
+     "col": 10,
+     "kind": "input",
+     "source": "Maturity",
+     "sample_type": "date"
+    },
+    {
+     "name": "FX_Rate",
+     "col": 11,
+     "kind": "formula",
+     "raw": "=VLOOKUP(H2,FX!$A$2:$B$8,2,FALSE)",
+     "sample_row": 2,
+     "sample_type": "decimal"
+    },
+    {
+     "name": "Exposure_USD",
+     "col": 12,
+     "kind": "formula",
+     "raw": "=ROUND(I2*L2,2)",
+     "sample_row": 2,
+     "sample_type": "decimal"
+    },
+    {
+     "name": "Risk_Weight",
+     "col": 13,
+     "kind": "formula",
+     "raw": "=VLOOKUP(F2,Ratings!$A$2:$C$7,3,FALSE)",
+     "sample_row": 2,
+     "sample_type": "decimal"
+    },
+    {
+     "name": "SME_Factor",
+     "col": 14,
+     "kind": "formula",
+     "raw": "=IF(M2<=1000000,0.7619,1)",
+     "sample_row": 2,
+     "sample_type": "decimal"
+    },
+    {
+     "name": "RWA",
+     "col": 15,
+     "kind": "formula",
+     "raw": "=ROUND(M2*N2*O2,2)",
+     "sample_row": 2,
+     "sample_type": "decimal"
+    },
+    {
+     "name": "Capital_Required",
+     "col": 16,
+     "kind": "formula",
+     "raw": "=ROUND(P2*0.08,2)",
+     "sample_row": 2,
+     "sample_type": "decimal"
+    },
+    {
+     "name": "Label",
+     "col": 17,
+     "kind": "formula",
+     "raw": "=B2&\"-\"&G2",
+     "sample_row": 2,
+     "sample_type": "text"
+    }
+   ],
+   "params": [],
+   "sample_rows": 22
+  }
+ ]
+}

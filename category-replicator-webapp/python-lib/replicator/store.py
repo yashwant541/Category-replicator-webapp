@@ -46,6 +46,19 @@ class LocalStore:
         with open(full, "wb") as fh:
             fh.write(data)
 
+    def put_file(self, path: str, local_path: str) -> None:
+        """Store a local file without reading it into memory."""
+        import shutil
+        full = self._p(path)
+        os.makedirs(os.path.dirname(full), exist_ok=True)
+        shutil.copyfile(local_path, full)
+
+    def size(self, path: str) -> Optional[int]:
+        try:
+            return os.path.getsize(self._p(path))
+        except OSError:
+            return None
+
     def list(self, prefix: str = "") -> List[str]:
         out = []
         for base, _, files in os.walk(self.root):
@@ -75,6 +88,16 @@ class DataikuStore:  # pragma: no cover - only inside Dataiku
 
     def put(self, path: str, data: bytes) -> None:
         self.f.upload_stream("/" + path.lstrip("/"), io.BytesIO(data))
+
+    def put_file(self, path: str, local_path: str) -> None:
+        with open(local_path, "rb") as fh:                      # streamed: a 500 MB file is never held in memory
+            self.f.upload_stream("/" + path.lstrip("/"), fh)
+
+    def size(self, path: str) -> Optional[int]:
+        try:
+            return int(self.f.get_path_details("/" + path.lstrip("/")).get("size"))
+        except Exception:  # noqa: BLE001
+            return None
 
     def list(self, prefix: str = "") -> List[str]:
         return sorted(p for p in self.f.list_paths_in_partition() if p.startswith("/" + prefix.lstrip("/")))
